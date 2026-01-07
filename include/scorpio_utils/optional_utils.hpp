@@ -47,7 +47,7 @@ constexpr inline auto optional_map(
   );
   using Y = std::invoke_result_t<Fn, Args...>;
   static_assert(!std::is_same_v<void, Y>, "Function must not return void");
-  return (args.has_value() && ...) ? std::optional<Y>(fn(args.value()...)) : std::nullopt;
+  return (args.has_value() && ...) ? std::optional<Y>(fn(*args ...)) : std::nullopt;
 }
 /**
  *  Invokes the function `fn` with values from the provided optional arguments.
@@ -94,7 +94,7 @@ constexpr inline auto optional_map(
   );
   using Y = std::invoke_result_t<Fn, Args...>;
   static_assert(!std::is_same_v<void, Y>, "Function must not return void");
-  return (args.has_value() && ...) ? std::optional<Y>(fn(args.value()...)) : std::nullopt;
+  return (args.has_value() && ...) ? std::optional<Y>(fn(*args ...)) : std::nullopt;
 }
 
 /**
@@ -183,7 +183,7 @@ constexpr inline auto optional_and_then(Fn&& fn, const std::optional<Args>& ... 
     IsOptional<std::invoke_result_t<Fn, Args...>>::value,
     "Function must return an optional type"
   );
-  return (args.has_value() && ...) ? fn(args.value()...) : std::nullopt;
+  return (args.has_value() && ...) ? fn(*args ...) : std::nullopt;
 }
 
 /**
@@ -231,7 +231,7 @@ constexpr inline auto optional_and_then(const Fn& fn, const std::optional<Args>&
     IsOptional<std::invoke_result_t<Fn, Args...>>::value,
     "Function must return an optional type"
   );
-  return (args.has_value() && ...) ? fn(args.value()...) : std::nullopt;
+  return (args.has_value() && ...) ? fn(*args ...) : std::nullopt;
 }
 
 /**

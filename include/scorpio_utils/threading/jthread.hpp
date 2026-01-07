@@ -29,7 +29,9 @@ public:
   SCU_ALWAYS_INLINE explicit JThread(Args&&... args)
   : std::thread(std::forward<Args>(args)...) { }
   SCU_ALWAYS_INLINE ~JThread() {
-    if (joinable()) {
+    if (get_id() == std::this_thread::get_id()) {
+      detach();
+    } else if (joinable()) {
       join();
     }
   }
