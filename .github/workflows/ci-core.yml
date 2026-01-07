@@ -1,0 +1,166 @@
+name: CI-Core
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-22.04
+    container: ros:humble-perception
+    strategy:
+      matrix:
+        ROS_DISTRO: [humble]
+    env:
+      ROS_DISTRO: ${{ matrix.ROS_DISTRO }}
+      TZ: 'Europe/Warsaw'
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+
+    steps:
+      - name: Install ament linting tools
+        run: |
+          apt-get update
+          apt-get install -y \
+            ros-${{ matrix.ROS_DISTRO }}-ament-black \
+            ros-${{ matrix.ROS_DISTRO }}-ament-cpplint \
+            ros-${{ matrix.ROS_DISTRO }}-ament-uncrustify \
+            ros-${{ matrix.ROS_DISTRO }}-ament-lint-cmake \
+            ros-${{ matrix.ROS_DISTRO }}-ament-xmllint
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          path: src/scorpio_utils
+
+      - name: Setup ROS2 workspace
+        run: |
+          # Create workspace directory structure
+          mkdir -p /workspace/src
+          # Move checked out code to proper workspace location
+          mv src/scorpio_utils /workspace/src/
+
+      # This is how we can pull one of our private repositories
+      # - name: Clone ScorpioOrganization external_packages repo
+      #   uses: actions/checkout@v4
+      #   with:
+      #     repository: scorpioOrganization/external_packages
+      #     path: /workspace/src/external_packages
+      #     ref: master
+      #     token: ${{ secrets.IGOR_GITHUB_KEY }}
+
+      # Run ros2 linters
+      - name: Run ament_cpplint
+        shell: bash
+        working-directory: /workspace
+        run: |
+          source /opt/ros/${{ matrix.ROS_DISTRO }}/setup.bash
+
+          cd src/scorpio_utils
+          find . -name "*.cpp" -o -name "*.hpp" -o -name "*.h" -o -name "*.cc" -o -name "*.cxx" -o -name "*.hh" -o -name "*.hxx" | grep -v external_packages | xargs -r ament_cpplint
+
+      - name: Run ament_uncrustify
+        shell: bash
+        working-directory: /workspace
+        run: |
+          source /opt/ros/${{ matrix.ROS_DISTRO }}/setup.bash
+          cd src/scorpio_utils
+          find . -name "*.cpp" -o -name "*.hpp" -o -name "*.h" -o -name "*.cc" -o -name "*.cxx" -o -name "*.hh" -o -name "*.hxx" | grep -v external_packages | xargs -r ament_uncrustify -c /workspace/src/scorpio_utils/uncrustify.cfg
+
+      - name: Run ament_black
+        shell: bash
+        working-directory: /workspace
+        run: |
+          source /opt/ros/${{ matrix.ROS_DISTRO }}/setup.bash
+          cd src/scorpio_utils
+          find . -name "*.py" -not -path "*/launch/*" -not -path "*launch_ROS2*" -not -path "*external_packages*" | xargs -r ament_black
+
+      - name: Run ament_lint_cmake
+        shell: bash
+        working-directory: /workspace
+        run: |
+          source /opt/ros/${{ matrix.ROS_DISTRO }}/setup.bash
+          cd src/scorpio_utils
+          find . -name "CMakeLists.txt" | grep -v external_packages | xargs -r ament_lint_cmake
+
+      - name: Run ament_xmllint
+        shell: bash
+        working-directory: /workspace
+        run: |
+          source /opt/ros/${{ matrix.ROS_DISTRO }}/setup.bash
+          cd src/scorpio_utils
+          find . -name "*.xml" | grep -v external_packages | xargs -r ament_xmllint
+
+      - name: Set timezone and install additional dependencies
+        run: |
+          apt-get update
+          apt-get install -y \
+            ccache \
+            libpcl-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            tzdata
+          ln -snf /usr/share/zoneinfo/Europe/Warsaw /etc/localtime
+          echo 'Europe/Warsaw' > /etc/timezone
+
+      - name: Cache build artifacts - ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ runner.os }}-${{ runner.arch }}-ccache-${{ matrix.ROS_DISTRO }}-${{ github.ref }}-${{ steps.calculate_hash.outputs.C_FILES_HASH }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-ccache-${{ matrix.ROS_DISTRO }}-${{ github.ref }}-
+            ${{ runner.os }}-${{ runner.arch }}-ccache-${{ matrix.ROS_DISTRO }}-refs/heads/master-
+            ${{ runner.os }}-${{ runner.arch }}-ccache-${{ matrix.ROS_DISTRO }}-
+
+      - name: Update rosdep
+        shell: bash
+        working-directory: /workspace
+        run: |
+          source /opt/ros/${{ matrix.ROS_DISTRO }}/setup.bash
+          rosdep update
+
+      - name: Install dependencies with rosdep
+        shell: bash
+        working-directory: /workspace
+        run: |
+          source /opt/ros/${{ matrix.ROS_DISTRO }}/setup.bash
+          rosdep install --from-paths src --ignore-src -r -y
+
+      - name: Build workspace
+        shell: bash
+        working-directory: /workspace
+        run: |
+          source /opt/ros/${{ matrix.ROS_DISTRO }}/setup.bash
+          export CMAKE_CXX_COMPILER_LAUNCHER=ccache
+          export CMAKE_C_COMPILER_LAUNCHER=ccache
+
+          colcon build \
+            --symlink-install \
+            --cmake-args \
+              -DNO_DATA_MANAGER=ON \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_VERBOSE_MAKEFILE=OFF \
+              -Wno-dev
+
+      - name: Run tests
+        shell: bash
+        working-directory: /workspace
+        run: |
+          source /opt/ros/${{ matrix.ROS_DISTRO }}/setup.bash
+          source install/setup.bash
+          colcon test --return-code-on-test-failure
+
+      - name: Show test results
+        if: always()
+        working-directory: /workspace
+        run: |
+          colcon test-result --verbose
