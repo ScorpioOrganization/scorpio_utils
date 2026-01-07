@@ -9,6 +9,7 @@
   <license>Proprietary</license>
   <author email="xxx@gmail.com">Igor Zaworski</author>
 
+  <depend>backward_ros</depend>
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
   
