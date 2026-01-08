@@ -58,4 +58,14 @@ template<size_t T>
 inline void to_host_byte_order(std::array<uint8_t, T>& buffer) {
   to_network_byte_order(buffer);
 }
+
+inline void to_network_byte_order(std::vector<uint8_t>& buffer) {
+  if (!is_big_endian) {
+    std::reverse(buffer.begin(), buffer.end());
+  }
+}
+
+inline void to_host_byte_order(std::vector<uint8_t>& buffer) {
+  to_network_byte_order(buffer);
+}
 }  // namespace scorpio_utils

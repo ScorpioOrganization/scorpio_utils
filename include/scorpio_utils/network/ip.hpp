@@ -49,6 +49,7 @@ public:
   uint32_t ip_network() const noexcept;
 
   static Ipv4 from_network(uint32_t ip_network) noexcept;
+  static Ipv4 from_string(const std::string& ip_str) noexcept;
 
   SCU_ALWAYS_INLINE constexpr bool operator==(const Ipv4& other) const noexcept {
     return _ip == other._ip;

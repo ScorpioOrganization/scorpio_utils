@@ -217,6 +217,9 @@ public:
     SCU_ALWAYS_INLINE constexpr bool is_reliable() const noexcept {
       return reliability > Reliability::UNRELIABLE_LATEST_ONLY;
     }
+    SCU_ALWAYS_INLINE constexpr bool is_ordered() const noexcept {
+      return reliability == Reliability::RELIABLE_ORDERED;
+    }
     SCU_ALWAYS_INLINE constexpr bool is_supported() const noexcept {
       return reliability != Reliability::UNRELIABLE_LATEST_ONLY && reliability != Reliability::RELIABLE_UNORDERED;
     }
@@ -274,7 +277,7 @@ private:
 
 public:
   SCU_ALWAYS_INLINE bool SCU_EAGER_SELECT_IS_READY() noexcept {
-    return !_receive.SCU_EAGER_SELECT_IS_READY();
+    return _receive.SCU_EAGER_SELECT_IS_READY();
   }
 
   SCU_ALWAYS_INLINE decltype(auto) SCU_EAGER_SELECT_GET_VALUE() noexcept {

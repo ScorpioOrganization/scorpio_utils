@@ -25,4 +25,9 @@ template<typename, typename = std::void_t<>>
 struct IsMessageType : std::false_type { };
 template<typename T>
 struct IsMessageType<T, std::void_t<typename T::template ConstUniquePtrWithDeleter<>>>: std::true_type { };
+
+template<typename T, typename = std::void_t<>>
+struct IsServiceType : std::false_type { };
+template<typename T>
+struct IsServiceType<T, std::void_t<typename T::Request, typename T::Response>>: std::true_type { };
 }  // namespace scorpio_utils::ros
