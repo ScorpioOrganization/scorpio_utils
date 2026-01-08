@@ -337,7 +337,7 @@ private:
 
 public:
   SCU_ALWAYS_INLINE bool SCU_EAGER_SELECT_IS_READY() noexcept {
-    return !_awaiting_streams.SCU_EAGER_SELECT_IS_READY();
+    return _awaiting_streams.SCU_EAGER_SELECT_IS_READY();
   }
 
   SCU_ALWAYS_INLINE decltype(auto) SCU_EAGER_SELECT_GET_VALUE() noexcept {
@@ -346,7 +346,7 @@ public:
 
   SCU_ALWAYS_INLINE ~ScorpioUdpConnection() {
     if (!close()) {
-      // _close_mutex.lock();
+      _close_mutex.lock();
     }
   }
 

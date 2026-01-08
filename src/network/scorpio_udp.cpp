@@ -16,7 +16,7 @@
  *  - While giving streams some CPU time look only for active streams (not iterate while 65536 streams)
  *
  * Worth to do:
- *  - Create some naested classes so it is clear which variable is used on which thread
+ *  - Create some nested classes so it is clear which variable is used on which thread
  */
 
 using std::literals::string_literals::operator""s;
@@ -88,7 +88,7 @@ SCU_HOT SCU_PURE static scorpio_utils::Expected<MessageHeader, std::string> pars
   if (code.is_not_last()) {
     header.frames_left = 0;
     if (!network_to_host(data, &*header.frames_left, header.data_offset)) {
-      return Unexpected("Failed to parse header: not enough data for seq_number"s);
+      return Unexpected("Failed to parse header: not enough data for frames_left"s);
     }
   }
   return header;
@@ -156,6 +156,7 @@ ScorpioUdp::~ScorpioUdp() {
   _receiver_channel.close();
   _sender_channel.close();
   stop();
+  std::lock_guard lock(_threads_mutex);
   SCU_ASSERT(_threads.empty(), "ScorpioUdp threads not stopped");
 }
 
@@ -832,22 +833,23 @@ void ScorpioUdpConnection::close_stream_packet_handler(const MessageHeader& head
         size_t response_offset = 1;
         response.reserve(3);
         if (!stream) {
-          response.push_back(AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED));
+          response.emplace_back(AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED));
         } else {
           ScorpioUdpStream::State expected = stream->state();
           while (stream->is_alive()) {
-            if (!stream->_state.compare_exchange_strong(
+            if (stream->_state.compare_exchange_strong(
                 expected,
                 ScorpioUdpStream::State::CLOSED,
                 std::memory_order_relaxed,
                 std::memory_order_relaxed)) {
-              response.push_back(AS_BYTE(Code::CloseStreamSubCommands::CLOSED));
+              response.emplace_back(AS_BYTE(Code::CloseStreamSubCommands::CLOSED));
             }
           }
           if (response.empty()) {
-            response.push_back(AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED));
+            response.emplace_back(AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED));
           }
         }
+        response.resize(3);
         SCU_DO_AND_ASSERT(host_to_network<uint16_t>(stream_number, response,
                                                  response_offset), "Failed to convert stream number to network format");
         send(Code::CLOSE_STREAM, response);
@@ -875,7 +877,7 @@ void ScorpioUdpConnection::heartbeat_packet_handler(const MessageHeader& header,
     if (auto stream = get_stream(stream_num)) {
       stream->handle_heartbeat_data(data.data, pos);
     } else {
-      // TODO(@Igor): Handle unexitsing stream found inside heartbeat
+      // TODO(@Igor): Handle non-exitsing stream found inside heartbeat
     }
   }
 }
@@ -1092,7 +1094,7 @@ bool ScorpioUdpConnection::close() {
   } else if (_processing_thread.joinable()) {
     _processing_thread.join();
   }
-  return false;
+  return true;
 }
 
 std::shared_ptr<ScorpioUdpStream> ScorpioUdpConnection::create_stream(
@@ -1250,7 +1252,7 @@ bool ScorpioUdpStream::closed() {
 bool ScorpioUdpStream::send_close_packet() {
   std::vector<uint8_t> packet;
   packet.resize(3);
-  packet.push_back(AS_BYTE(Code::CloseStreamSubCommands::CLOSE));
+  packet[0] = AS_BYTE(Code::CloseStreamSubCommands::CLOSE);
   size_t offset = 1;
   SCU_DO_AND_ASSERT(host_to_network<uint16_t>(_stream_number, packet,
                                        offset), "Failed to convert stream number to network format");
