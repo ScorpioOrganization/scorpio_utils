@@ -11,7 +11,7 @@ add_compile_options(-std=c++17 -Wall -Wextra -Wpedantic -pedantic-errors -Wdepre
   # -flto=auto
 )
 
-# add_link_options(-flto=auto)
+add_link_options(-flto=auto)
 
 include_directories(
   include/
