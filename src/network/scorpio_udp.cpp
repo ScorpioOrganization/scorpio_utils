@@ -128,7 +128,9 @@ static void serialize_qos(const ScorpioUdpStream::StreamQoS& qos, std::vector<ui
 // ========================= ScorpioUdp implementation =================================
 
 std::shared_ptr<ScorpioUdp> ScorpioUdp::create() {
-  return std::shared_ptr<ScorpioUdp>(new ScorpioUdp());
+  auto ans = std::shared_ptr<ScorpioUdp>(new ScorpioUdp());
+  ans->_start_signal.notify(100000);
+  return ans;
 }
 
 ScorpioUdp::ScorpioUdp()
@@ -278,7 +280,11 @@ void ScorpioUdp::sender_thread() {
 
 void ScorpioUdp::processing_thread() {
   try {
-    while (SCU_LIKELY(!_stop.load(std::memory_order_relaxed))) {
+    _start_signal.wait();
+    const auto self_weak = weak_from_this();
+    std::shared_ptr<ScorpioUdp> self;
+    while (SCU_LIKELY((self = self_weak.lock()) && !_stop.load(std::memory_order_relaxed))) {
+      SCU_DEFER([&self] { self.reset(); });
       std::visit(VisitorOverloadingHelper{
         [this](UdpData packet) SCU_ALWAYS_INLINE_RAW {
           process_packet(std::move(packet));
@@ -339,6 +345,7 @@ void ScorpioUdp::handle_connect_packet(const MessageHeader& header, const UdpDat
 #endif
           std::shared_ptr<ScorpioUdpConnection> new_connection(new ScorpioUdpConnection(
                       udp_data.ip, udp_data.port, shared_from_this()));
+          new_connection->_start_signal.notify(100000);
           new_connection->_state.store(ScorpioUdpConnection::State::CONNECTING);
           _connections.insert({ { udp_data.ip, udp_data.port }, new_connection });
           SCU_ASSERT(_new_connections, "Channel must exist if auto accept is enabled");
@@ -600,6 +607,7 @@ std::shared_ptr<ScorpioUdpConnection> ScorpioUdp::connect(
   Ipv4 ip,
   Port port) {
   std::shared_ptr<ScorpioUdpConnection> connection(new ScorpioUdpConnection(ip, port, shared_from_this()));
+  connection->_start_signal.notify(100000);
   _awaiting_connections_channel.send<true>(connection);
   return connection;
 }
@@ -990,18 +998,25 @@ void ScorpioUdpConnection::send_heartbeat() {
 
 void ScorpioUdpConnection::processing_thread() {
   try {
-    while (SCU_LIKELY(!_stop.load(std::memory_order_relaxed)) && _state.load(std::memory_order_relaxed) == State::NEW) {
+    _start_signal.wait();
+    const auto self_weak = weak_from_this();
+    std::shared_ptr<ScorpioUdpConnection> self;
+    while (SCU_LIKELY((self = self_weak.lock()) && !_stop.load(std::memory_order_relaxed)) &&
+      _state.load(std::memory_order_relaxed) == State::NEW) {
+      SCU_DEFER([&self] { self.reset(); });
       std::this_thread::sleep_for(std::chrono::nanoseconds(HEARTBEAT_PERIOD / 4));
     }
     std::this_thread::sleep_for(std::chrono::nanoseconds(HEARTBEAT_PERIOD));
-    while (SCU_LIKELY(!_stop.load(std::memory_order_relaxed)) &&
+    while (SCU_LIKELY((self = self_weak.lock()) && !_stop.load(std::memory_order_relaxed)) &&
       _state.load(std::memory_order_relaxed) == State::CONNECTING) {
+      SCU_DEFER([&self] { self.reset(); });
       send_or_panic(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) });
       std::this_thread::sleep_for(std::chrono::nanoseconds(HEARTBEAT_PERIOD));
     }
     threading::EagerSelectTimeout timeout(HEARTBEAT_PERIOD, _time_provider);
     timeout.start();
-    while (SCU_LIKELY(!_stop.load(std::memory_order_relaxed))) {
+    while (SCU_LIKELY((self = self_weak.lock()) && !_stop.load(std::memory_order_relaxed))) {
+      SCU_DEFER([&self] { self.reset(); });
       std::visit(VisitorOverloadingHelper{
         [this](std::pair<scorpio_utils::network::MessageHeader,
         scorpio_utils::network::UdpData> data) SCU_ALWAYS_INLINE_RAW {
