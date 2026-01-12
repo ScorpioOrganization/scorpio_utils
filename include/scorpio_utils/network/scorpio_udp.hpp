@@ -267,6 +267,9 @@ public:
   SCU_ALWAYS_INLINE auto is_active() const noexcept {
     return _state.load(std::memory_order_relaxed) == State::CREATED;
   }
+  SCU_ALWAYS_INLINE auto is_panic() const noexcept {
+    return _state.load(std::memory_order_relaxed) == State::ERROR;
+  }
   inline std::optional<std::string_view> panic_message() const {
     if (_state.load(std::memory_order_acquire) == State::ERROR) {
       return _panic_message;
@@ -302,6 +305,7 @@ private:
   std::shared_ptr<scorpio_utils::time_provider::LazyTimeProvider> _time_provider;
   std::atomic<int64_t> _last_received_packet_time;
   std::thread _processing_thread;
+  std::mutex _panic_mutex;
 
   bool connected();
 
@@ -401,6 +405,7 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   std::atomic<bool> _auto_accept;
   std::atomic<bool> _stop;
   std::unordered_map<std::pair<Ipv4, Port>, std::weak_ptr<ScorpioUdpConnection>> _user_connections;
+  std::mutex _panic_mutex;
 
   std::string _panic_message;
   std::atomic<bool> _panic;
@@ -417,21 +422,11 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
     Ipv4 remote_ip,
     Port remote_port,
     const std::vector<uint8_t>& data);
-  inline bool send(
+  bool send(
     Ipv4 remote_ip,
     Port remote_port,
     std::vector<uint8_t>&& packet
-  ) {
-    if (SCU_UNLIKELY(!_socket.is_open())) {
-      return false;
-    }
-    _sender_channel.send<true>({
-        /*._ip =   */ remote_ip,
-        /*._port = */ remote_port,
-        /*._data = */ std::move(packet),
-    });
-    return true;
-  }
+  );
   void send_or_panic(
     std::optional<StreamNumber> stream_number,
     std::atomic<size_t>& sequence_number,
