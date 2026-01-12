@@ -6,7 +6,7 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 
 add_compile_options(-std=c++17 -Wall -Wextra -Wpedantic -pedantic-errors -Wdeprecated
-  -Wc++17-compat -Wconversion -Wsign-conversion -Werror -flto=auto)
+  -Wc++17-compat -Wconversion -Wsign-conversion -Wpessimizing-move -Werror -flto=auto)
 
 add_link_options(-flto=auto)
 

@@ -13,7 +13,7 @@ constexpr void scorpio_utils::threading::ThreadPool::async_call(
   static_assert(std::is_invocable_v<Fn>, "Task must be invocable");
   static_assert(std::is_same_v<Return, std::invoke_result_t<Fn>>,
                 "Return type must match the task's return type");
-  add_task(std::move([this, task = std::move(task), future = std::move(future)]() mutable {
+  add_task([this, task = std::move(task), future = std::move(future)]() mutable {
       future->set_started();
       if constexpr (std::is_same_v<Return, void>) {
         task();
@@ -21,7 +21,7 @@ constexpr void scorpio_utils::threading::ThreadPool::async_call(
       } else {
         future->set_done(task());
       }
-   }));
+   });
 }
 
 template<typename Fn, bool Wait>
@@ -89,7 +89,7 @@ constexpr scorpio_utils::threading::WaitGroup::shared_ptr scorpio_utils::threadi
             task(static_cast<N>(begin + i));
           }
     });
-    wait_group->add(std::move(std::static_pointer_cast<WaitableBase>(future)));
+    wait_group->add(std::static_pointer_cast<WaitableBase>(future));
     begin += static_cast<N>(work_per_thread + 1);
   }
   for (; begin < end; begin += work_per_thread) {
@@ -98,7 +98,7 @@ constexpr scorpio_utils::threading::WaitGroup::shared_ptr scorpio_utils::threadi
             task(static_cast<N>(begin + i));
           }
     });
-    wait_group->add(std::move(std::static_pointer_cast<WaitableBase>(future)));
+    wait_group->add(std::static_pointer_cast<WaitableBase>(future));
   }
   return wait_group;
 }
