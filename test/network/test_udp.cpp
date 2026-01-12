@@ -151,7 +151,7 @@ TEST(UdpSocketTest, HighLoad) {
         if (receive_result.err()) {
           break;
         }
-        EXPECT_EQ(std::move(receive_result).ok_value().byte_count, 4);
+        EXPECT_EQ(receive_result.ok_value().byte_count, 4);
         EXPECT_TRUE(received_values.insert(*reinterpret_cast<uint32_t*>(buffer)).second) <<
           "Duplicate packet received: " << *reinterpret_cast<uint32_t*>(buffer);
       }

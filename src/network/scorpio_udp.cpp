@@ -125,21 +125,6 @@ static void serialize_qos(const ScorpioUdpStream::StreamQoS& qos, std::vector<ui
   }
 }
 
-template<typename T, typename Y>
-SCU_CONST_FUNC constexpr T least_significant_bytes_to_val(T last_val, Y cur_val) {
-  static_assert(sizeof(T) >= sizeof(Y));
-  // Mask that takes bytes from size_t that are not included to SeqNumber
-  constexpr T significant_bytes_mask = ~SCU_AS(T, ~SCU_AS(Y, 0));
-  constexpr T significant_bytes_increment_step = SCU_AS(T, 1) << SCU_AS(T, (sizeof(Y) * 8));
-  // Static cast and truncating bytes is intentional
-  const auto significant_bytes = significant_bytes_mask & last_val;
-  if (cur_val <= SCU_AS(Y, last_val)) {
-    return SCU_AS(T, cur_val) | significant_bytes;
-  } else {
-    return SCU_AS(T, cur_val) | (significant_bytes + significant_bytes_increment_step);
-  }
-}
-
 // ========================= ScorpioUdp implementation =================================
 
 std::shared_ptr<ScorpioUdp> ScorpioUdp::create() {
@@ -158,6 +143,26 @@ ScorpioUdp::~ScorpioUdp() {
   stop();
   std::lock_guard lock(_threads_mutex);
   SCU_ASSERT(_threads.empty(), "ScorpioUdp threads not stopped");
+}
+
+bool ScorpioUdp::send(
+  Ipv4 remote_ip,
+  Port remote_port,
+  std::vector<uint8_t>&& packet
+) {
+  if (SCU_UNLIKELY(!_socket.is_open())) {
+    return false;
+  }
+  try {
+    _sender_channel.send<true>({
+      /*._ip =   */ remote_ip,
+      /*._port = */ remote_port,
+      /*._data = */ std::move(packet),
+      });
+  } catch (const threading::ClosedChannelException&) {
+    return false;
+  }
+  return true;
 }
 
 bool ScorpioUdp::stop() {
@@ -208,8 +213,7 @@ scorpio_utils::Expected<scorpio_utils::Success, std::string> ScorpioUdp::listen(
 }
 
 SCU_NORETURN SCU_COLD void ScorpioUdp::panic(std::string&& message) {
-  static std::mutex panic_mutex;
-  std::unique_lock<std::mutex> lock(panic_mutex, std::try_to_lock);
+  std::unique_lock<std::mutex> lock(_panic_mutex, std::try_to_lock);
   if (!lock.owns_lock()) {
     // Lock mutex to delay returning from panic so, there is _panic_message set
     lock.lock();
@@ -232,7 +236,7 @@ void ScorpioUdp::receiver_thread() {
     while (SCU_LIKELY(!_stop.load(std::memory_order_relaxed))) {
       std::vector<uint8_t> data(MAX_PACKET_SIZE);
       auto result = _socket.receive(data.data(), data.size());
-      if (result.is_err()) {
+      if (SCU_UNLIKELY(result.is_err())) {
         panic("Failed to receive data: " + std::move(result).err_value());
         break;
       }
@@ -247,6 +251,7 @@ void ScorpioUdp::receiver_thread() {
       });
     }
   } catch (const PanicException&) {
+  } catch (const threading::ClosedChannelException&) {
   }
 }
 
@@ -259,10 +264,9 @@ void ScorpioUdp::sender_thread() {
                                           << " bytes), max is " << MAX_PACKET_SIZE << " bytes");
       if (SCU_UNLIKELY(!_socket.is_open())) {
         panic("Socket is not open");
-        break;
       }
       auto result = _socket.send(msg.data.data(), msg.data.size(), msg.ip, msg.port);
-      if (result.is_err()) {
+      if (SCU_UNLIKELY(result.is_err())) {
         panic(std::move(result).err_value());
       }
       SCU_ASSERT(result.ok_value() == msg.data.size(), "UDP send less bytes then requested");
@@ -1023,8 +1027,7 @@ void ScorpioUdpConnection::processing_thread() {
 }
 
 SCU_COLD SCU_NORETURN void ScorpioUdpConnection::panic(std::string&& message) {
-  static std::mutex panic_mutex;
-  std::unique_lock<std::mutex> lock(panic_mutex, std::try_to_lock);
+  std::unique_lock<std::mutex> lock(_panic_mutex, std::try_to_lock);
   if (!lock.owns_lock()) {
     // Lock mutex to delay returning from panic so, there is _panic_message set
     lock.lock();
@@ -1158,6 +1161,9 @@ bool ScorpioUdpStream::close() {
 
 SCU_HOT bool ScorpioUdpStream::send(Code code, const std::vector<uint8_t>& data) {
   if (SCU_UNLIKELY(!is_active())) {
+#if SCU_UDP_DEBUG_LOG_ENABLED == 1
+    std::cerr << "Attempted to send on inactive stream state: " << static_cast<int>(state()) << "\n";
+#endif
     return false;
   }
   auto packets = _parent->generate_packets(
@@ -1167,6 +1173,10 @@ SCU_HOT bool ScorpioUdpStream::send(Code code, const std::vector<uint8_t>& data)
     _sequence_number
   );
   if (SCU_UNLIKELY(!packets.has_value())) {
+#if SCU_UDP_DEBUG_LOG_ENABLED == 1
+    std::cerr << "Failed to generate packets for sending " << data.size() << " bytes on stream "
+              << _stream_number << "\n";
+#endif
     return false;
   }
   auto seq = packets->first;
@@ -1174,12 +1184,13 @@ SCU_HOT bool ScorpioUdpStream::send(Code code, const std::vector<uint8_t>& data)
     if (_stream_qos.is_reliable()) {
       const auto pos = seq % _sent_history.size();
       const auto least_non_delivered = _least_non_delivered_seq_number.load(std::memory_order_relaxed);
-      if (SCU_LIKELY(least_non_delivered != 0) && pos == least_non_delivered % _sent_history.size()) {
+      if (seq - least_non_delivered >= _sent_history.size()) {
 #if SCU_UDP_DEBUG_LOG_ENABLED == 1
         std::cerr << "Attempted to send packet with sequence number less than least non-delivered\n" <<
           "Least non-delivered: " << least_non_delivered << ", sent seq: " << seq << "\n";
 #endif
-        panic("Attempted to send packet with sequence number less than least non-delivered");
+        panic("Attempted to send packet with sequence number less than least non-delivered " +
+          std::to_string(least_non_delivered) + ", sent seq: " + std::to_string(seq));
         return false;
       }
       _sent_history[pos] = packet;
@@ -1199,6 +1210,9 @@ SCU_COLD void ScorpioUdpStream::panic(std::string&& message) {
   if (!lock.owns_lock()) {
     // Lock mutex to delay returning from panic so, there is _panic_message set
     lock.lock();
+    return;
+  }
+  if (_state.load(std::memory_order_relaxed) == State::ERROR) {
     return;
   }
 #if SCU_UDP_DEBUG_LOG_ENABLED == 1
@@ -1496,12 +1510,10 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
   }
   // Operation loses its atomicity, but it's ok since this is the only place where
   // _least_non_delivered_seq_number is modified
-  _least_non_delivered_seq_number.store(
-    least_significant_bytes_to_val(
-      _least_non_delivered_seq_number.load(std::memory_order_relaxed),
-      end),
-    std::memory_order_relaxed);
-  size_t greatest_seen_val = _least_non_delivered_seq_number;
+  size_t greatest_seen_val = least_significant_bytes_to_val(
+    _least_non_delivered_seq_number.load(std::memory_order_relaxed),
+    end);
+  _least_non_delivered_seq_number.store(greatest_seen_val, std::memory_order_relaxed);
   SeqNumber begin;
   std::atomic_thread_fence(std::memory_order_acquire);
   while (range_count--) {
