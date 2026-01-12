@@ -889,7 +889,7 @@ void ScorpioUdpConnection::heartbeat_packet_handler(const MessageHeader& header,
     if (auto stream = get_stream(stream_num)) {
       stream->handle_heartbeat_data(data.data, pos);
     } else {
-      // TODO(@Igor): Handle non-exitsing stream found inside heartbeat
+      // TODO(@Igor): Handle non-existing stream found inside heartbeat
     }
   }
 }

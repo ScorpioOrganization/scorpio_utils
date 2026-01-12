@@ -24,7 +24,7 @@
 
 namespace scorpio_utils {
 template<typename T>
-SCU_ALWAYS_INLINE SCU_CONST_FUNC T clone(T v) {
+SCU_ALWAYS_INLINE SCU_PURE T clone(T v) {
   return v;
 }
 
@@ -51,7 +51,7 @@ template<typename T, typename Y>
 SCU_CONST_FUNC constexpr T least_significant_bytes_to_val(T last_val, Y cur_val) {
   static_assert(sizeof(T) >= sizeof(Y));
   // Mask that takes bytes from size_t that are not included to SeqNumber
-  // This excessive casting is actually necessary because apparently ~SCU_AS(uin8_t, 0) will be promoted to int
+  // This excessive casting is actually necessary because apparently ~SCU_AS(uint8_t, 0) will be promoted to int
   constexpr T significant_bytes_mask = SCU_AS(T, ~SCU_AS(T, SCU_AS(Y, ~SCU_AS(Y, 0))));
   constexpr T significant_bytes_increment_step = SCU_AS(T, SCU_AS(T, 1) << SCU_AS(T, (sizeof(Y) * 8)));
   // Static cast and truncating bytes is intentional

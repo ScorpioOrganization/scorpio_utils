@@ -8,7 +8,7 @@
 
 namespace scorpio_utils::network {
 namespace {
-SCU_NEVER_INLINE static bool is_big_endian_() {
+SCU_NEVER_INLINE static inline bool is_big_endian_() {
   union {
     uint32_t i;
     char c[4];
