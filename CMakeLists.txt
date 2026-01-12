@@ -11,7 +11,7 @@ add_compile_options(-std=c++17 -Wall -Wextra -Wpedantic -pedantic-errors -Wdepre
   # -flto=auto
 )
 
-add_link_options(-flto=auto)
+# add_link_options(-flto=auto)
 
 include_directories(
   include/
@@ -132,6 +132,7 @@ if(BUILD_TESTING)
     test_defer.cpp
     test_endianness.cpp
     test_expected.cpp
+    test_misc.cpp
     test_optional_utils.cpp
     test_sat_math.cpp
     test_stack_shared_ptr.cpp
