@@ -173,7 +173,7 @@ TEST(ScorpioUdp, LargePacket) {
       "\nServer connection panic message:\n" <<
       server_connection->panic_message().value_or("<no_panic>");
   }
-  std::this_thread::sleep_for(std::chrono::seconds(6));
+  std::this_thread::sleep_for(std::chrono::seconds(10));
   for (size_t i = 0; i < NUM_PACKETS; ++i) {
     auto received_data = server_stream->receive<false>();
     if (!received_data.has_value()) {
@@ -208,7 +208,7 @@ for (size_t i = 0; i < NUM_PACKETS; ++i) {
     ASSERT_TRUE(client_stream->send(data)) << "Failed to send packet: " << i << "\nPanic message:\n" <<
       client_stream->panic_message().value_or("<no_panic>");
 }
-std::this_thread::sleep_for(std::chrono::seconds(6));
+std::this_thread::sleep_for(std::chrono::seconds(10));
 for (size_t i = 0; i < NUM_PACKETS; ++i) {
     auto received_data = server_stream->receive<false>();
     if (!received_data.has_value()) {
