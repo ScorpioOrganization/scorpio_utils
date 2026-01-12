@@ -95,6 +95,8 @@ SCU_HOT SCU_PURE static scorpio_utils::Expected<MessageHeader, std::string> pars
 }
 
 static std::shared_ptr<scorpio_utils::time_provider::LazyTimeProvider> get_time_provider() {
+  static std::mutex mutex;
+  std::lock_guard lock(mutex);
   static std::weak_ptr<scorpio_utils::time_provider::LazyTimeProvider> weak_provider;
   if (auto provider = weak_provider.lock()) {
     return provider;
