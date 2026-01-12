@@ -15,11 +15,11 @@ concurrency:
 
 jobs:
   build_and_test:
-    runs-on: ubuntu-22.04
-    container: ros:humble-perception
     strategy:
       matrix:
-        ROS_DISTRO: [humble]
+        ROS_DISTRO: [humble, jazzy]
+    runs-on: ${{ matrix.ROS_DISTRO == 'humble' && 'ubuntu-22.04' || 'ubuntu-24.04' }}
+    container: ros:${{ matrix.ROS_DISTRO }}-perception
     env:
       ROS_DISTRO: ${{ matrix.ROS_DISTRO }}
       TZ: 'Europe/Warsaw'
