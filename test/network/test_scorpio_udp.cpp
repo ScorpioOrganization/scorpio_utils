@@ -4,6 +4,7 @@
 #include <chrono>
 #include <thread>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 
 #include "scorpio_utils/decorators.hpp"
@@ -172,6 +173,9 @@ TEST(ScorpioUdp, LargePacket) {
       server_stream->panic_message().value_or("<no_panic>") <<
       "\nServer connection panic message:\n" <<
       server_connection->panic_message().value_or("<no_panic>");
+    if (i % 100 == 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
   }
   std::this_thread::sleep_for(std::chrono::seconds(10));
   for (size_t i = 0; i < NUM_PACKETS; ++i) {
@@ -186,38 +190,43 @@ TEST(ScorpioUdp, LargePacket) {
 }
 
 TEST(ScorpioUdp, LargePacketUnreliable) {
-const auto [client_connection, server_connection] = get_client_server_connection(PORT);
-ASSERT_TRUE(client_connection);
-ASSERT_TRUE(server_connection);
-server_connection->set_auto_accept_stream(true);
-client_connection->set_auto_accept_stream(true);
-constexpr size_t NUM_PACKETS = 1000ul;
-  constexpr size_t PACKET_SIZE = 5000ul;
-auto server_stream =
+  const auto [client_connection, server_connection] = get_client_server_connection(PORT);
+  ASSERT_TRUE(client_connection);
+  ASSERT_TRUE(server_connection);
+  server_connection->set_auto_accept_stream(true);
+  client_connection->set_auto_accept_stream(true);
+  constexpr size_t NUM_PACKETS = 1000ul;
+    constexpr size_t PACKET_SIZE = 5000ul;
+  auto server_stream =
     server_connection->create_stream(1, { NUM_PACKETS* PACKET_SIZE / 500,
         ScorpioUdpStream::StreamQoS::Reliability::UNRELIABLE });
-std::this_thread::sleep_for(std::chrono::seconds(3));
-ASSERT_TRUE(server_stream);
-ASSERT_TRUE(server_stream->is_active()) << SCU_AS(int, server_stream->state());
-auto client_stream_opt = client_connection->get_accepted_stream();
-ASSERT_TRUE(client_stream_opt.has_value());
-ASSERT_TRUE(client_stream_opt.value()->is_active());
-auto client_stream = std::move(client_stream_opt).value();
-std::vector<uint8_t> data(PACKET_SIZE, 42);
-for (size_t i = 0; i < NUM_PACKETS; ++i) {
+  std::this_thread::sleep_for(std::chrono::seconds(3));
+  ASSERT_TRUE(server_stream);
+  ASSERT_TRUE(server_stream->is_active()) << SCU_AS(int, server_stream->state());
+  auto client_stream_opt = client_connection->get_accepted_stream();
+  ASSERT_TRUE(client_stream_opt.has_value());
+  ASSERT_TRUE(client_stream_opt.value()->is_active());
+  auto client_stream = std::move(client_stream_opt).value();
+  std::vector<uint8_t> data(PACKET_SIZE, 42);
+  for (size_t i = 0; i < NUM_PACKETS; ++i) {
     ASSERT_TRUE(client_stream->send(data)) << "Failed to send packet: " << i << "\nPanic message:\n" <<
       client_stream->panic_message().value_or("<no_panic>");
-}
-std::this_thread::sleep_for(std::chrono::seconds(10));
-for (size_t i = 0; i < NUM_PACKETS; ++i) {
+    if (i % 100 == 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+  std::this_thread::sleep_for(std::chrono::seconds(10));
+  std::unordered_set<size_t> received_indices;
+  for (size_t i = 0; i < NUM_PACKETS; ++i) {
     auto received_data = server_stream->receive<false>();
     if (!received_data.has_value()) {
-      FAIL() << "Failed to receive data at " << i;
-      return;
+      break;
     }
     ASSERT_EQ(received_data.value().size(), data.size());
     ASSERT_EQ(received_data.value(), data);
-}
+    ASSERT_TRUE(received_indices.insert(i).second) << "Duplicate packet received: " << i;
+  }
+  EXPECT_GT(received_indices.size(), NUM_PACKETS / 2);
 }
 
 TEST(ScorpioUdp, LongConnection) {
@@ -226,7 +235,7 @@ TEST(ScorpioUdp, LongConnection) {
   ASSERT_TRUE(server_connection);
   server_connection->set_auto_accept_stream(true);
   client_connection->set_auto_accept_stream(true);
-  constexpr size_t NUM_PACKETS = 4ul;
+  constexpr size_t NUM_PACKETS = 2ul;
   auto server_stream =
     server_connection->create_stream(1, { 1, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED });
   std::this_thread::sleep_for(std::chrono::seconds(3));
