@@ -253,6 +253,7 @@ TEST(ScorpioUdp, LongConnection) {
       "\nServer connection panic message:\n" <<
       server_connection->panic_message().value_or("<no_panic>");
   }
+  std::this_thread::sleep_for(std::chrono::seconds(2));
   for (uint16_t i = 0; i < NUM_PACKETS; ++i) {
     auto received_data = server_stream->receive<true>();
     ASSERT_EQ(received_data.size(), 2u);
