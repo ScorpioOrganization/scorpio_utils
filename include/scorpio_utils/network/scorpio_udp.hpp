@@ -21,6 +21,7 @@
 #include "scorpio_utils/network/udp.hpp"
 #include "scorpio_utils/threading/channel.hpp"
 #include "scorpio_utils/threading/eager_select.hpp"
+#include "scorpio_utils/threading/signal.hpp"
 #include "scorpio_utils/time_provider/lazy_time_provider.hpp"
 #include "scorpio_utils/types.hpp"
 
@@ -306,6 +307,7 @@ private:
   std::atomic<int64_t> _last_received_packet_time;
   std::thread _processing_thread;
   std::mutex _panic_mutex;
+  threading::Signal _start_signal;
 
   bool connected();
 
@@ -406,6 +408,7 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   std::atomic<bool> _stop;
   std::unordered_map<std::pair<Ipv4, Port>, std::weak_ptr<ScorpioUdpConnection>> _user_connections;
   std::mutex _panic_mutex;
+  threading::Signal _start_signal;
 
   std::string _panic_message;
   std::atomic<bool> _panic;
