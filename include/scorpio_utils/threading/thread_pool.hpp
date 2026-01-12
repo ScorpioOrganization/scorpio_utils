@@ -64,7 +64,7 @@ constexpr scorpio_utils::threading::WaitGroup::shared_ptr scorpio_utils::threadi
   WaitGroup::shared_ptr wait_group = std::make_shared<WaitGroup>();
   for (; begin != end; ++begin) {
     const auto future = async([task, begin = *begin]() mutable { task(begin); });
-    wait_group->add(std::move(std::static_pointer_cast<WaitableBase>(future)));
+    wait_group->add(std::static_pointer_cast<WaitableBase>(future));
   }
   return wait_group;
 }
