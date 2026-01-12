@@ -22,7 +22,8 @@ struct VisitorOverloadingHelper : T ... { using T::operator() ...; };
 template<class ... T>
 VisitorOverloadingHelper(T ...)->VisitorOverloadingHelper<T...>;
 
-#ifdef __cpp_lib_hardware_interference_size
+// Define hardware interference size if not defined by the standard library
+#if defined(__cpp_lib_hardware_interference_size) && false  // Disable for now
 # define SCU_HARDWARE_DESTRUCTIVE_INTERFERENCE_SIZE (std::hardware_destructive_interference_size)
 #else
 # define SCU_HARDWARE_DESTRUCTIVE_INTERFERENCE_SIZE 64
