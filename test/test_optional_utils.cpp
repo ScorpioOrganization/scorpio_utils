@@ -36,6 +36,37 @@ TEST(OptionalMap, base_case) {
   EXPECT_EQ(result.value(), 4) << "Result value should be 4, which is 2 + 2";
 }
 
+TEST(OptionalMap, two_vals) {
+  /// INITIAL PARAMS
+  std::optional<int> initial = 2;
+  std::optional<int> initial2 = 3;
+
+  /// TEST CASE
+  auto result = scorpio_utils::optional_map([](int x, int y) { return x + y; }, initial, initial2);
+
+  /// CHECK
+  ASSERT_TRUE(initial.has_value()) << "Initial optional should have a value";
+  EXPECT_EQ(initial.value(), 2) << "Initial value should be 2";
+  ASSERT_TRUE(initial2.has_value()) << "Initial optional should have a value";
+  EXPECT_EQ(initial2.value(), 3) << "Initial value should be 2";
+  ASSERT_TRUE(result.has_value()) << "Result optional should have a value";
+  EXPECT_EQ(result.value(), 5) << "Result value should be 4, which is 2 + 3";
+}
+
+TEST(OptionalMap, val_nullopt) {
+  /// INITIAL PARAMS
+  std::optional<int> initial = 2;
+  std::optional<int> initial2;
+
+  /// TEST CASE
+  auto result = scorpio_utils::optional_map([](int x, int y) { return x + y; }, initial, initial2);
+
+  /// CHECK
+  ASSERT_TRUE(initial.has_value()) << "Initial optional should have a value";
+  EXPECT_EQ(initial.value(), 2) << "Initial value should be 2";
+  ASSERT_FALSE(result.has_value()) << "Result optional should have a value";
+}
+
 TEST(OptionalMap, nullopt_case) {
   /// INITIAL PARAMS
   std::optional<int> initial;
