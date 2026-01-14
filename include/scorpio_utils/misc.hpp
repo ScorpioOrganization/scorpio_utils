@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include <limits>
 #include <memory>
 #include <new>
 #include <utility>
@@ -25,6 +26,7 @@
 
 #include "scorpio_utils/assert.hpp"
 #include "scorpio_utils/decorators.hpp"
+#include "scorpio_utils/sat_math.hpp"
 #include "scorpio_utils/type_traits.hpp"
 
 namespace scorpio_utils {
@@ -163,18 +165,25 @@ SCU_ALWAYS_INLINE auto dynamic_as(From&& from) {
 }
 
 template<typename T, typename Y>
-SCU_CONST_FUNC constexpr T least_significant_bytes_to_val(T last_val, Y cur_val) {
+SCU_CONST_FUNC constexpr T least_significant_bytes_to_val(T last_val, Y cur_val) noexcept {
   static_assert(sizeof(T) >= sizeof(Y));
   // Mask that takes bytes from size_t that are not included to SeqNumber
   // This excessive casting is actually necessary because apparently ~SCU_AS(uint8_t, 0) will be promoted to int
   constexpr T significant_bytes_mask = SCU_AS(T, ~SCU_AS(T, SCU_AS(Y, ~SCU_AS(Y, 0))));
   constexpr T significant_bytes_increment_step = SCU_AS(T, SCU_AS(T, 1) << SCU_AS(T, (sizeof(Y) * 8)));
+  const auto current_trimmed = SCU_AS(Y, last_val);
+  if (sat_sub(cur_val, current_trimmed) > (std::numeric_limits<Y>::max() / 2)) {
+    constexpr auto step_size = SCU_AS(T, SCU_AS(T, std::numeric_limits<Y>::max()) + 1);
+    return SCU_AS(T, ((last_val & significant_bytes_mask) | cur_val) - step_size);
+  }
+  if (sat_sub(current_trimmed, cur_val) < (std::numeric_limits<Y>::max() / 2)) {
+    return SCU_AS(T, (last_val & significant_bytes_mask) | cur_val);
+  }
   // Static cast and truncating bytes is intentional
   const auto significant_bytes = significant_bytes_mask & last_val;
-  if (cur_val < SCU_AS(Y, last_val)) {
-    return SCU_AS(T, cur_val) | (significant_bytes + significant_bytes_increment_step);
-  } else {
-    return SCU_AS(T, cur_val) | significant_bytes;
+  if (cur_val < current_trimmed) {
+    return SCU_AS(T, SCU_AS(T, cur_val) | (significant_bytes + significant_bytes_increment_step));
   }
+  return SCU_AS(T, SCU_AS(T, cur_val) | significant_bytes);
 }
 }  // namespace scorpio_utils
