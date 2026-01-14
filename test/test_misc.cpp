@@ -23,3 +23,23 @@ TEST(least_significant_bytes_to_val, BiggerStepsTest) {
     ASSERT_EQ(last_val, cur_val) << "Failed at cur_val=" << cur_val;
   }
 }
+
+TEST(least_significant_bytes_to_val, ManualTests) {
+  using scorpio_utils::least_significant_bytes_to_val;
+
+  // Bigger
+  auto val = least_significant_bytes_to_val<uint16_t, uint8_t>(256, 1);
+  EXPECT_EQ(val, 257);
+  val = least_significant_bytes_to_val<uint16_t, uint8_t>(140, 1);
+  EXPECT_EQ(val, 257);
+
+  // Smaller
+  val = least_significant_bytes_to_val<uint16_t, uint8_t>(376, 251);
+  EXPECT_EQ(val, 251);
+  val = least_significant_bytes_to_val<uint16_t, uint8_t>(376, 1);
+  EXPECT_EQ(val, 257);
+
+  // Same
+  val = least_significant_bytes_to_val<uint16_t, uint8_t>(257, 1);
+  EXPECT_EQ(val, 257);
+}
