@@ -1203,10 +1203,10 @@ SCU_HOT bool ScorpioUdpStream::send(Code code, const std::vector<uint8_t>& data)
       const auto least_non_delivered = _least_non_delivered_seq_number.load(std::memory_order_relaxed);
       if (seq - least_non_delivered >= _sent_history.size()) {
 #if SCU_UDP_DEBUG_LOG_ENABLED == 1
-        std::cerr << "Attempted to send packet with sequence number less than least non-delivered\n" <<
+        std::cerr << "QoS depth exceeded\n" <<
           "Least non-delivered: " << least_non_delivered << ", sent seq: " << seq << "\n";
 #endif
-        panic("Attempted to send packet with sequence number less than least non-delivered " +
+        panic("QoS depth exceeded " +
           std::to_string(least_non_delivered) + ", sent seq: " + std::to_string(seq));
         return false;
       }
