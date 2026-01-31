@@ -55,6 +55,10 @@ add_library(network SHARED
   src/network/udp.cpp
 )
 
+target_compile_definitions(network PRIVATE
+  -DSCORPIO_UTILS_SUDP_LOG_TO_FILE=1
+)
+
 set(LIBRARY_LIST
   buffered_file_saver
   gps
