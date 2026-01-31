@@ -3,6 +3,9 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
+#include <fstream>
+#endif
 #include <functional>
 #include <map>
 #include <memory>
@@ -17,6 +20,9 @@
 #include <variant>
 #include <vector>
 #include "scorpio_utils/expected.hpp"
+#if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
+#include "scorpio_utils/logger.hpp"
+#endif
 #include "scorpio_utils/network/orderer.hpp"
 #include "scorpio_utils/network/udp.hpp"
 #include "scorpio_utils/threading/channel.hpp"
@@ -215,6 +221,10 @@ private:
   SeqNumber _last_greatest_sequence_number;
   std::string _panic_message;
 
+#if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
+  void log_to_file(std::string&& message);
+#endif
+
   size_t get_packet_number(SeqNumber seq) noexcept;
 
   bool send_create_packet();
@@ -308,6 +318,10 @@ private:
   std::thread _processing_thread;
   std::mutex _panic_mutex;
   threading::Signal _start_signal;
+
+#if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
+  void log_to_file(std::string&& message);
+#endif
 
   bool connected();
 
@@ -409,6 +423,11 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   std::unordered_map<std::pair<Ipv4, Port>, std::weak_ptr<ScorpioUdpConnection>> _user_connections;
   std::mutex _panic_mutex;
   threading::Signal _start_signal;
+#if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
+  scorpio_utils::Logger<std::ofstream> _logger;
+
+  void log_to_file(std::string&& message);
+#endif
 
   std::string _panic_message;
   std::atomic<bool> _panic;

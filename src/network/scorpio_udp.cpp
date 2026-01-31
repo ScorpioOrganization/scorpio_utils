@@ -3,6 +3,9 @@
 #include <chrono>
 #include <cmath>
 #include <exception>
+#if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
+#include <sstream>
+#endif
 #include "scorpio_utils/assert.hpp"
 #include "scorpio_utils/decorators.hpp"
 #include "scorpio_utils/misc.hpp"
@@ -39,6 +42,12 @@ using scorpio_utils::network::UdpData;
 #define SCU_UDP_DEBUG_LOG_ENABLED (0)
 #define HEARTBEAT_PERIOD (50'000'000)
 #define TIMEOUT (5'000'000'000)
+
+#if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
+# define SUDP_LOG(message) log_to_file((std::ostringstream() << message).str())
+#else
+# define SUDP_LOG(message)
+#endif
 
 struct PanicException : public std::exception { };
 
@@ -138,15 +147,23 @@ std::shared_ptr<ScorpioUdp> ScorpioUdp::create() {
 ScorpioUdp::ScorpioUdp()
 : _new_connections(nullptr),
   _auto_accept(false),
-  _stop(true) { }
+  _stop(true)
+#if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
+  , _logger("scorpio_udp_log.txt")
+#endif
+{
+  SUDP_LOG("ScorpioUdp created");
+}
 
 ScorpioUdp::~ScorpioUdp() {
+  SUDP_LOG("ScorpioUdp destructor called");
   _awaiting_connections_channel.close();
   _receiver_channel.close();
   _sender_channel.close();
   stop();
   std::lock_guard lock(_threads_mutex);
   SCU_ASSERT(_threads.empty(), "ScorpioUdp threads not stopped");
+  SUDP_LOG("ScorpioUdp destroyed");
 }
 
 bool ScorpioUdp::send(
@@ -179,6 +196,7 @@ bool ScorpioUdp::stop() {
     std::memory_order_relaxed))) {
     return false;
   }
+  SUDP_LOG("ScorpioUdp stopping");
   _auto_accept.store(false, std::memory_order_relaxed);
   _socket.close();
   const auto this_thread_id = std::this_thread::get_id();
@@ -191,6 +209,7 @@ bool ScorpioUdp::stop() {
     _threads.pop_back();
   }
   _new_connections.reset();
+  SUDP_LOG("ScorpioUdp stopped");
   return true;
 }
 
@@ -200,12 +219,14 @@ bool ScorpioUdp::start() {
                                                   std::memory_order_relaxed))) {
     return false;
   }
+  SUDP_LOG("ScorpioUdp starting");
   _socket.open();
   _stop.store(false, std::memory_order_relaxed);
   _new_connections = std::make_unique<decltype(_new_connections)::element_type>();
   _threads.emplace_back(&ScorpioUdp::receiver_thread, this);
   _threads.emplace_back(&ScorpioUdp::sender_thread, this);
   _threads.emplace_back(&ScorpioUdp::processing_thread, this);
+  SUDP_LOG("ScorpioUdp started");
   return true;
 }
 
@@ -613,6 +634,12 @@ std::shared_ptr<ScorpioUdpConnection> ScorpioUdp::connect(
   _awaiting_connections_channel.send<true>(connection);
   return connection;
 }
+
+#if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
+void ScorpioUdp::log_to_file(std::string&& message) {
+  _logger.log(std::move(message));
+}
+#endif
 
 // ========================= ScorpioUdpConnection implementation =======================
 
@@ -1135,6 +1162,12 @@ std::shared_ptr<ScorpioUdpStream> ScorpioUdpConnection::create_stream(
   return stream;
 }
 
+#if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
+void ScorpioUdpConnection::log_to_file(std::string&& message) {
+  _parent->log_to_file(std::move(message));
+}
+#endif
+
 // ========================= ScorpioUdpStream implementation ===========================
 
 ScorpioUdpStream::ScorpioUdpStream(
@@ -1558,3 +1591,9 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
     greatest_seen_val = least_significant_bytes_to_val(begin_transformed, end);
   }
 }
+
+#if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
+void ScorpioUdpStream::log_to_file(std::string&& message) {
+  _parent->log_to_file(std::move(message));
+}
+#endif
