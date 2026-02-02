@@ -327,7 +327,8 @@ private:
 
   threading::Channel<std::pair<MessageHeader, UdpData>, 1024 * 1024> _incoming_packets;
   threading::Channel<std::shared_ptr<ScorpioUdpStream>, 1024> _awaiting_streams;
-  std::array<std::weak_ptr<ScorpioUdpStream>, 65537> _streams;
+  std::array<std::weak_ptr<ScorpioUdpStream>, std::numeric_limits<StreamNumber>::max() + 1> _streams;
+  std::array<std::atomic<bool>, std::numeric_limits<StreamNumber>::max() + 1> _stream_exists;
   std::vector<std::weak_ptr<ScorpioUdpStream>> _streams_being_created;
   uint16_t _next_stream_to_heartbeat;
   std::shared_ptr<ScorpioUdpStream> get_stream(StreamNumber);
