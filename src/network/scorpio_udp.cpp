@@ -1151,7 +1151,13 @@ std::shared_ptr<ScorpioUdpStream> ScorpioUdpConnection::create_stream(
   if (SCU_UNLIKELY(!_parent->is_running())) {
     return std::shared_ptr<ScorpioUdpStream>();
   }
-  if (get_stream(stream_id)) {
+  bool expected = false;
+  if (!_stream_exists[stream_id].compare_exchange_strong(
+    expected,
+    true,
+    std::memory_order_relaxed,
+    std::memory_order_relaxed
+    )) {
     return std::shared_ptr<ScorpioUdpStream>();
   }
   if (!qos.is_reliable() && qos.depth != 0) {
@@ -1203,6 +1209,13 @@ bool ScorpioUdpStream::close() {
         panic("Failed to send CLOSE_STREAM packet (maybe connection or socket is closed?)");
         return false;
       }
+      bool expected = true;
+      SCU_ASSERT(_parent->_stream_exists[_stream_number].compare_exchange_strong(
+          expected,
+          false,
+          std::memory_order_relaxed,
+          std::memory_order_relaxed
+        ), "Stream existence flag was already false on destruction");
       return true;
     }
   }
