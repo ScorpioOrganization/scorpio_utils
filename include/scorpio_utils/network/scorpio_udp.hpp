@@ -7,6 +7,7 @@
 #include <fstream>
 #endif
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
