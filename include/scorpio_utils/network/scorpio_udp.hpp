@@ -254,9 +254,7 @@ public:
     return _receive.SCU_EAGER_SELECT_GET_VALUE();
   }
 
-  SCU_ALWAYS_INLINE ~ScorpioUdpStream() {
-    close();
-  }
+  ~ScorpioUdpStream();
 
   bool send(const std::vector<uint8_t>& data);
   template<bool Wait = false>
