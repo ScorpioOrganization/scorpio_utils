@@ -712,27 +712,38 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
 #endif
           return;
         }
-        if (auto stream = get_stream(stream_number)) {
-          if (stream->qos() == *qos_opt) {
-            if (stream->state() == ScorpioUdpStream::State::CREATING) {
-              stream->connected();
+        std::shared_ptr<ScorpioUdpStream> stream;
+        do {
+          bool expected = false;
+          if (auto stream = get_stream(stream_number)) {
+            if (stream->qos() == *qos_opt) {
+              if (stream->state() == ScorpioUdpStream::State::CREATING) {
+                stream->connected();
+              }
+              response_code = Code::CreateStreamSubCommands::ALREADY_EXISTS;
+            } else {
+              stream->panic("Peer tried to create stream with existing stream number but different QoS");
+              response_code = Code::CreateStreamSubCommands::REJECT_SIMILAR_EXISTED;
             }
-            response_code = Code::CreateStreamSubCommands::ALREADY_EXISTS;
-          } else {
-            stream->panic("Peer tried to create stream with existing stream number but different QoS");
-            response_code = Code::CreateStreamSubCommands::REJECT_SIMILAR_EXISTED;
+            break;
+          } else if (!_auto_accept_stream.load(std::memory_order_relaxed)) {
+            response_code = Code::CreateStreamSubCommands::REJECT;
+            break;
+          } else if (_stream_exists[stream_number].compare_exchange_strong(
+              expected,
+              true,
+              std::memory_order_relaxed,
+              std::memory_order_relaxed)) {
+            std::shared_ptr<ScorpioUdpStream> new_stream(new ScorpioUdpStream(
+                  stream_number, *qos_opt, shared_from_this()));
+            new_stream->_state.store(ScorpioUdpStream::State::CREATING, std::memory_order_relaxed);
+            new_stream->connected();
+            _streams[stream_number] = new_stream;
+            _new_streams.send<true>(std::move(new_stream));
+            response_code = Code::CreateStreamSubCommands::ACCEPT;
+            break;
           }
-        } else if (_auto_accept_stream.load(std::memory_order_relaxed)) {
-          std::shared_ptr<ScorpioUdpStream> new_stream(new ScorpioUdpStream(
-                stream_number, *qos_opt, shared_from_this()));
-          new_stream->_state.store(ScorpioUdpStream::State::CREATING, std::memory_order_relaxed);
-          new_stream->connected();
-          _streams[stream_number] = new_stream;
-          _new_streams.send<true>(std::move(new_stream));
-          response_code = Code::CreateStreamSubCommands::ACCEPT;
-        } else {
-          response_code = Code::CreateStreamSubCommands::REJECT;
-        }
+        } while (true);
         std::vector<uint8_t> response;
         response.reserve(offset - header.data_offset);
         response.push_back(AS_BYTE(response_code));
@@ -1197,6 +1208,17 @@ ScorpioUdpStream::ScorpioUdpStream(
   }
 }
 
+ScorpioUdpStream::~ScorpioUdpStream() {
+  close();
+  bool expected = true;
+  SCU_ASSERT(_parent->_stream_exists[_stream_number].compare_exchange_strong(
+      expected,
+      false,
+      std::memory_order_relaxed,
+      std::memory_order_relaxed
+    ), "Stream existence flag was already false on destruction");
+}
+
 bool ScorpioUdpStream::close() {
   State expected = state();
   while (is_active()) {
@@ -1209,13 +1231,6 @@ bool ScorpioUdpStream::close() {
         panic("Failed to send CLOSE_STREAM packet (maybe connection or socket is closed?)");
         return false;
       }
-      bool expected = true;
-      SCU_ASSERT(_parent->_stream_exists[_stream_number].compare_exchange_strong(
-          expected,
-          false,
-          std::memory_order_relaxed,
-          std::memory_order_relaxed
-        ), "Stream existence flag was already false on destruction");
       return true;
     }
   }
