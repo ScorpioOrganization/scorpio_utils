@@ -6,7 +6,7 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 
 add_compile_options(-std=c++17 -Wall -Wextra -Wpedantic -pedantic-errors -Wdeprecated
-  -Wc++17-compat -Wconversion -Wsign-conversion -Werror -flto=auto)
+  -Wc++17-compat -Wconversion -Wsign-conversion -Wpessimizing-move -Werror -flto=auto)
 
 add_link_options(-flto=auto)
 
@@ -76,15 +76,6 @@ install(DIRECTORY
 )
 
 if(BUILD_TESTING)
-  find_package(ament_lint_auto REQUIRED)
-  find_package(ament_cmake_uncrustify REQUIRED)
-
-  list(APPEND AMENT_LINT_AUTO_EXCLUDE ament_cmake_uncrustify)
-
-  ament_lint_auto_find_test_dependencies()
-  ament_uncrustify(
-    CONFIG_FILE ${CMAKE_CURRENT_SOURCE_DIR}/uncrustify.cfg)
-
   find_package(ament_cmake_gtest REQUIRED)
 
   # List of test names

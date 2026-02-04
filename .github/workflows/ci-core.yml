@@ -15,11 +15,11 @@ concurrency:
 
 jobs:
   build_and_test:
-    runs-on: ubuntu-22.04
-    container: ros:humble-perception
     strategy:
       matrix:
-        ROS_DISTRO: [humble]
+        ROS_DISTRO: [humble, jazzy]
+    runs-on: ${{ matrix.ROS_DISTRO == 'humble' && 'ubuntu-22.04' || 'ubuntu-24.04' }}
+    container: ros:${{ matrix.ROS_DISTRO }}-perception
     env:
       ROS_DISTRO: ${{ matrix.ROS_DISTRO }}
       TZ: 'Europe/Warsaw'
@@ -68,6 +68,7 @@ jobs:
           find . -name "*.cpp" -o -name "*.hpp" -o -name "*.h" -o -name "*.cc" -o -name "*.cxx" -o -name "*.hh" -o -name "*.hxx" | grep -v external_packages | xargs -r ament_cpplint
 
       - name: Run ament_uncrustify
+        if: matrix.ROS_DISTRO == 'humble'
         shell: bash
         working-directory: /workspace
         run: |
@@ -76,6 +77,7 @@ jobs:
           find . -name "*.cpp" -o -name "*.hpp" -o -name "*.h" -o -name "*.cc" -o -name "*.cxx" -o -name "*.hh" -o -name "*.hxx" | grep -v external_packages | xargs -r ament_uncrustify -c /workspace/src/scorpio_utils/uncrustify.cfg
 
       - name: Run ament_black
+        if: matrix.ROS_DISTRO == 'humble'
         shell: bash
         working-directory: /workspace
         run: |
@@ -84,6 +86,7 @@ jobs:
           find . -name "*.py" -not -path "*/launch/*" -not -path "*launch_ROS2*" -not -path "*external_packages*" | xargs -r ament_black
 
       - name: Run ament_lint_cmake
+        if: matrix.ROS_DISTRO == 'humble'
         shell: bash
         working-directory: /workspace
         run: |
@@ -92,6 +95,7 @@ jobs:
           find . -name "CMakeLists.txt" | grep -v external_packages | xargs -r ament_lint_cmake
 
       - name: Run ament_xmllint
+        if: matrix.ROS_DISTRO == 'humble'
         shell: bash
         working-directory: /workspace
         run: |
