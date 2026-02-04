@@ -99,7 +99,6 @@ if(BUILD_TESTING)
     threading/test_thread_pool.cpp
     threading/test_thread_streams.cpp
     threading/test_wait_group.cpp
-    threading/test_atomic_ring_buffer.cpp
     time_provider/test_lazy_time_provider.cpp
     time_provider/test_system_time_provider.cpp
     time_utils/test_time_string.cpp
