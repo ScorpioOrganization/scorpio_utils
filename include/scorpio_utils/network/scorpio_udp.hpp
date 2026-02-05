@@ -32,6 +32,12 @@
 #include "scorpio_utils/time_provider/lazy_time_provider.hpp"
 #include "scorpio_utils/types.hpp"
 
+#if defined(SCORPIO_UTILS_UDP_GMOCK) && SCORPIO_UTILS_UDP_GMOCK == 1
+# define SCU_UDP_MOCK
+#elif defined(SCU_UDP_MOCK)
+# error SCU_UDP_MOCK shall not be defined it is for internal use only
+#endif
+
 namespace scorpio_utils::network {
 struct UdpData {
   scorpio_utils::network::Ipv4 ip;
@@ -412,11 +418,16 @@ public:
 
 class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   friend class ScorpioUdpConnection;
+  std::shared_ptr<scorpio_utils::time_provider::LazyTimeProvider> _time_provider;
   std::unique_ptr<threading::Channel<std::shared_ptr<ScorpioUdpConnection>>> _new_connections;
   threading::Channel<UdpData, 1024 * 16> _sender_channel;
   threading::Channel<UdpData, 1024 * 16> _receiver_channel;
   threading::Channel<std::weak_ptr<ScorpioUdpConnection>> _awaiting_connections_channel;
+#ifndef SCU_UDP_MOCK
   scorpio_utils::network::UdpSocket _socket;
+#else
+  scorpio_utils::network::UdpSocket& _socket;
+#endif
   std::atomic<size_t> _mock_sequence_number;
   std::atomic<bool> _auto_accept;
   std::atomic<bool> _stop;
@@ -458,7 +469,14 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
     const std::vector<uint8_t>& data,
     std::string&& panic_message = "Failed to send UDP packet");
 
-  ScorpioUdp();
+#ifdef SCU_UDP_MOCK
+  explicit
+#endif
+  ScorpioUdp(
+#ifdef SCU_UDP_MOCK
+    scorpio_utils::network::UdpSocket& socket
+#endif
+  );
 
   void sender_thread();
   void receiver_thread();
@@ -483,7 +501,11 @@ public:
     return _new_connections->SCU_EAGER_SELECT_GET_VALUE();
   }
 
-  [[nodiscard]] static std::shared_ptr<ScorpioUdp> create();
+  [[nodiscard]] static std::shared_ptr<ScorpioUdp> create(
+#ifdef SCU_UDP_MOCK
+    scorpio_utils::network::UdpSocket& socket
+#endif
+  );
   ~ScorpioUdp();
 
   bool start();

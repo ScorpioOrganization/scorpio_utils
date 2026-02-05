@@ -138,14 +138,34 @@ static void serialize_qos(const ScorpioUdpStream::StreamQoS& qos, std::vector<ui
 
 // ========================= ScorpioUdp implementation =================================
 
-std::shared_ptr<ScorpioUdp> ScorpioUdp::create() {
-  auto ans = std::shared_ptr<ScorpioUdp>(new ScorpioUdp());
+std::shared_ptr<ScorpioUdp> ScorpioUdp::create(
+#ifdef SCU_UDP_MOCK
+  scorpio_utils::network::UdpSocket& socket
+#endif
+) {
+  auto ans = std::shared_ptr<ScorpioUdp>(new ScorpioUdp(
+#ifdef SCU_UDP_MOCK
+    socket
+#endif
+  ));
   ans->_start_signal.notify(100000);
   return ans;
 }
 
-ScorpioUdp::ScorpioUdp()
-: _new_connections(nullptr),
+ScorpioUdp::ScorpioUdp(
+#ifdef SCU_UDP_MOCK
+  scorpio_utils::network::UdpSocket& socket
+#endif
+)
+: _time_provider([] {
+      auto result = get_time_provider();
+      result->set_time_offset(HEARTBEAT_PERIOD / 2);
+      return result;
+    }()),
+  _new_connections(nullptr),
+#ifdef SCU_UDP_MOCK
+  _socket(socket),
+#endif
   _auto_accept(false),
   _stop(true)
 #if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
@@ -221,7 +241,6 @@ bool ScorpioUdp::start() {
   }
   SUDP_LOG("ScorpioUdp starting");
   _socket.open();
-  _stop.store(false, std::memory_order_relaxed);
   _new_connections = std::make_unique<decltype(_new_connections)::element_type>();
   _threads.emplace_back(&ScorpioUdp::receiver_thread, this);
   _threads.emplace_back(&ScorpioUdp::sender_thread, this);
@@ -308,6 +327,7 @@ void ScorpioUdp::processing_thread() {
     std::shared_ptr<ScorpioUdp> self;
     while (SCU_LIKELY((self = self_weak.lock()) && !_stop.load(std::memory_order_relaxed))) {
       SCU_DEFER([&self] { self.reset(); });
+      threading::EagerSelectTimeout timeout(50, _time_provider);
       std::visit(VisitorOverloadingHelper{
         [this](UdpData packet) SCU_ALWAYS_INLINE_RAW {
           process_packet(std::move(packet));
@@ -315,7 +335,8 @@ void ScorpioUdp::processing_thread() {
         [this](std::weak_ptr<ScorpioUdpConnection> connection) SCU_ALWAYS_INLINE_RAW {
           pull_awaiting_connections(connection);
         },
-      }, threading::eager_select(_receiver_channel, _awaiting_connections_channel));
+        [] (Empty) SCU_ALWAYS_INLINE_RAW { /* Timeout */ },
+      }, threading::eager_select(_receiver_channel, _awaiting_connections_channel, timeout.start()));
     }
   } catch (const PanicException&) {
   } catch (const threading::ClosedChannelException&) {
@@ -650,11 +671,7 @@ ScorpioUdpConnection::ScorpioUdpConnection(Ipv4 remote_ip, Port remote_port, std
   _state(State::NEW),
   _parent(std::move(parent)),
   _stop(false),
-  _time_provider([]() {
-      auto result = get_time_provider();
-      result->set_time_offset(HEARTBEAT_PERIOD / 2);
-      return result;
-    }()),
+  _time_provider(_parent->_time_provider),
   _last_received_packet_time(_time_provider->get_time()),
   _processing_thread(&ScorpioUdpConnection::processing_thread, this),
   _next_stream_to_heartbeat(0) {

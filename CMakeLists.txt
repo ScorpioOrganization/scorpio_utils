@@ -7,9 +7,11 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 
 add_compile_options(-std=c++17 -Wall -Wextra -Wpedantic -pedantic-errors -Wdeprecated
-  -Wc++17-compat -Wconversion -Wsign-conversion -Wpessimizing-move -Werror -flto=auto)
+  -Wc++17-compat -Wconversion -Wsign-conversion -Wpessimizing-move -Werror
+  # -flto=auto
+)
 
-add_link_options(-flto=auto)
+# add_link_options(-flto=auto)
 
 include_directories(
   include/
@@ -89,6 +91,12 @@ install(DIRECTORY
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_gmock REQUIRED)
+  ament_find_gmock()
+
+  # Suppress warnings from gmock
+  target_compile_options(${GMOCK_MAIN_LIBRARIES} PRIVATE -Wno-deprecated -Wno-sign-conversion)
+  target_compile_options(${GMOCK_LIBRARIES} PRIVATE -Wno-deprecated -Wno-sign-conversion)
 
   # List of test names
   set(TESTS_NAMES
@@ -179,6 +187,39 @@ if(BUILD_TESTING)
     time_provider
     time_utils
     threading
+  )
+
+  # Test of gmock with udp.hpp
+  ament_add_gtest(test_scorpio_udp_gmock test/network/test_scorpio_udp_gmock.cpp)
+
+  add_library(network_gmock STATIC
+    src/network/ip.cpp
+    src/network/scorpio_udp.cpp
+  )
+  target_compile_options(network_gmock PRIVATE -std=gnu++17)
+  target_compile_definitions(network_gmock PRIVATE
+    -DSCORPIO_UTILS_UDP_GMOCK=1
+    -DSCORPIO_UTILS_SUDP_LOG_TO_FILE=1
+  )
+  target_include_directories(network_gmock PRIVATE SYSTEM ${GMOCK_INCLUDE_DIRS})
+  target_link_libraries(network_gmock ${GMOCK_MAIN_LIBRARIES} ${GMOCK_LIBRARIES})
+
+  target_link_libraries(test_scorpio_udp_gmock
+    buffered_file_saver
+    gps
+    lifetime_helper
+    network_gmock
+    string_utils
+    time_provider
+    time_utils
+    threading
+  )
+  target_include_directories(test_scorpio_udp_gmock PRIVATE SYSTEM ${GMOCK_INCLUDE_DIRS})
+  target_link_libraries(test_scorpio_udp_gmock ${GMOCK_MAIN_LIBRARIES} ${GMOCK_LIBRARIES})
+  target_compile_options(test_scorpio_udp_gmock PRIVATE -std=gnu++17)
+  target_compile_definitions(test_scorpio_udp_gmock PRIVATE
+    -DSCORPIO_UTILS_UDP_GMOCK=1
+    -DSCORPIO_UTILS_SUDP_LOG_TO_FILE=1
   )
 endif()
 
