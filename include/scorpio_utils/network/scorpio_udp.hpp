@@ -38,6 +38,17 @@
 # error SCU_UDP_MOCK shall not be defined it is for internal use only
 #endif
 
+#ifdef SCU_UDP_MOCK
+#include "scorpio_utils/testing/mock_time_provider.hpp"
+#endif
+
+#define MAX_PACKET_SIZE (512)
+#define QOS_DEPTH_SAFETY_BUFFER (2048)
+#define UNRELIABLE_DATA_EXPIRY_NS (500'000'000)  // 500 milliseconds
+#define SCU_UDP_DEBUG_LOG_ENABLED (0)
+#define HEARTBEAT_PERIOD (50'000'000)
+#define TIMEOUT (5'000'000'000)
+
 namespace scorpio_utils::network {
 struct UdpData {
   scorpio_utils::network::Ipv4 ip;
@@ -50,6 +61,12 @@ using SeqNumber = uint32_t;
 using SeqNumberComplement = uint32_t;
 using StreamNumber = uint16_t;
 using FramesLeft = uint16_t;
+
+#ifdef SCU_UDP_MOCK
+using TimeProvider = scorpio_utils::testing::MockTimeProvider;
+#else
+using TimeProvider = time_provider::LazyTimeProvider;
+#endif
 
 struct MessageHeader {
   size_t data_offset;
@@ -91,6 +108,7 @@ struct Code {
   };
 
   enum class DisconnectSubCommands : uint8_t {
+    DISCONNECT,
     ACCEPTED,
     REJECTED,
     ALREADY_DISCONNECTED,
@@ -152,7 +170,8 @@ struct Code {
   constexpr bool is_connectionless() const noexcept {
     auto v = get_command();
     return v == PING ||
-           v == CONNECT;
+           v == CONNECT ||
+           v == DISCONNECT;
   }
   constexpr bool is_first() const noexcept {
     return (value & FIRST) != 0;
@@ -318,7 +337,7 @@ private:
   threading::Channel<std::shared_ptr<ScorpioUdpStream>, 1024> _new_streams;
   std::atomic<bool> _auto_accept_stream;
   std::atomic<bool> _stop;
-  std::shared_ptr<scorpio_utils::time_provider::LazyTimeProvider> _time_provider;
+  std::shared_ptr<TimeProvider> _time_provider;
   std::atomic<int64_t> _last_received_packet_time;
   std::thread _processing_thread;
   std::mutex _panic_mutex;
@@ -342,6 +361,7 @@ private:
   void create_stream_packet_handler(const MessageHeader& header, UdpData&& data);
   void close_stream_packet_handler(const MessageHeader& header, UdpData&& data);
   void heartbeat_packet_handler(const MessageHeader& header, UdpData&& data);
+  void disconnect_packet_handler(const MessageHeader& header, UdpData&& data);
   void process_packets(std::pair<scorpio_utils::network::MessageHeader, scorpio_utils::network::UdpData> packet);
   void send_heartbeat();
   void processing_thread();
@@ -418,7 +438,7 @@ public:
 
 class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   friend class ScorpioUdpConnection;
-  std::shared_ptr<scorpio_utils::time_provider::LazyTimeProvider> _time_provider;
+  std::shared_ptr<TimeProvider> _time_provider;
   std::unique_ptr<threading::Channel<std::shared_ptr<ScorpioUdpConnection>>> _new_connections;
   threading::Channel<UdpData, 1024 * 16> _sender_channel;
   threading::Channel<UdpData, 1024 * 16> _receiver_channel;
@@ -443,11 +463,6 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   std::string _panic_message;
   std::atomic<bool> _panic;
   void panic(std::string&& message);
-  std::optional<std::pair<size_t, std::vector<std::vector<uint8_t>>>> generate_packets(
-    std::optional<StreamNumber> stream_number,
-    std::atomic<size_t>& sequence_number,
-    Code code,
-    const std::vector<uint8_t>& data);
   bool send(
     std::optional<StreamNumber> stream_number,
     std::atomic<size_t>& sequence_number,
@@ -549,3 +564,11 @@ public:
   }
 };
 }  // namespace scorpio_utils::network
+
+#ifdef SCU_UDP_MOCK
+std::optional<std::pair<size_t, std::vector<std::vector<uint8_t>>>> generate_packets(
+  std::optional<scorpio_utils::network::StreamNumber> stream_number,
+  std::atomic<size_t>& sequence_number,
+  scorpio_utils::network::Code code,
+  const std::vector<uint8_t>& data);
+#endif
