@@ -190,7 +190,7 @@ if(BUILD_TESTING)
     threading
   )
 
-  # Test of gmock with udp.hpp
+  # Test of scorpio_udp with gmock for udp.hpp
   ament_add_gtest(test_scorpio_udp_gmock test/network/test_scorpio_udp_gmock.cpp)
 
   add_library(network_gmock STATIC
@@ -220,6 +220,35 @@ if(BUILD_TESTING)
   target_compile_options(test_scorpio_udp_gmock PRIVATE -std=gnu++17)
   target_compile_definitions(test_scorpio_udp_gmock PRIVATE
     -DSCORPIO_UTILS_UDP_GMOCK=1
+    -DSCORPIO_UTILS_SUDP_LOG_TO_FILE=1
+  )
+
+  # Test of scorpio_udp with framework
+  ament_add_gtest(test_scorpio_udp_framework test/network/test_scorpio_udp_framework.cpp)
+
+  add_library(network_framework_test STATIC
+    src/network/ip.cpp
+    src/network/scorpio_udp.cpp
+  )
+  target_compile_definitions(network_framework_test PRIVATE
+    -DSCORPIO_UTILS_FRAMEWORK=1
+    -DSCORPIO_UTILS_SUDP_LOG_TO_FILE=1
+  )
+  target_include_directories(network_framework_test PRIVATE SYSTEM ${GMOCK_INCLUDE_DIRS})
+  target_link_libraries(network_framework_test ${GMOCK_MAIN_LIBRARIES} ${GMOCK_LIBRARIES})
+
+  target_link_libraries(test_scorpio_udp_framework
+    buffered_file_saver
+    gps
+    lifetime_helper
+    network_framework_test
+    string_utils
+    time_provider
+    time_utils
+    threading
+  )
+  target_compile_definitions(test_scorpio_udp_framework PRIVATE
+    -DSCORPIO_UTILS_FRAMEWORK=1
     -DSCORPIO_UTILS_SUDP_LOG_TO_FILE=1
   )
 endif()

@@ -32,7 +32,8 @@
 #include "scorpio_utils/time_provider/lazy_time_provider.hpp"
 #include "scorpio_utils/types.hpp"
 
-#if defined(SCORPIO_UTILS_UDP_GMOCK) && SCORPIO_UTILS_UDP_GMOCK == 1
+#if (defined(SCORPIO_UTILS_UDP_GMOCK) && SCORPIO_UTILS_UDP_GMOCK == 1) || \
+  (defined(SCORPIO_UTILS_FRAMEWORK) && SCORPIO_UTILS_FRAMEWORK == 1)
 # define SCU_UDP_MOCK
 #elif defined(SCU_UDP_MOCK)
 # error SCU_UDP_MOCK shall not be defined it is for internal use only
