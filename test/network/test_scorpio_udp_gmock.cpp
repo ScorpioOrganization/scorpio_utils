@@ -11,8 +11,8 @@
 # endif
 # define SCORPIO_UTILS_UDP_GMOCK 1
 #endif
-#include "scorpio_utils/network/udp.hpp"
 #include "scorpio_utils/network/scorpio_udp.hpp"
+#include "scorpio_utils/network/udp.hpp"
 
 using std::literals::string_literals::operator""s;
 using scorpio_utils::network::ScorpioUdp;
@@ -60,9 +60,7 @@ std::shared_ptr<scorpio_utils::testing::MockTimeProvider> get_time_provider();
       return true; \
   }); \
   EXPECT_CALL(socket, is_open()) \
-  .WillRepeatedly(Return(true)); \
-  EXPECT_CALL(*time_provider, set_time_offset(Eq(HEARTBEAT_PERIOD / 2))) \
-  .Times(AtLeast(1))
+  .WillRepeatedly(Return(true));
 
 #define CREATE_SCORPIO_UDP \
   auto scorpio_udp = ScorpioUdp::create(socket); \
@@ -88,6 +86,7 @@ TEST(ScorpioUdpGmock, Listen) {
   EXPECT_TRUE(scorpio_udp->start()); \
   auto result = scorpio_udp->listen(ip, port);
   EXPECT_TRUE(result.is_ok()) << "Failed to listen: " << result.err_value();
+  EXPECT_EQ(time_provider->get_time_offset(), HEARTBEAT_PERIOD / 2);
 
   time_provider->advance_time(TIMEOUT);
 

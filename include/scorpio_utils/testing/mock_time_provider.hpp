@@ -3,11 +3,11 @@
 #include <atomic>
 #include <cstdint>
 #include "scorpio_utils/time_provider/time_provider.hpp"
-#include "scorpio_utils/testing/gmock.hpp"
 
 namespace scorpio_utils::testing {
 class MockTimeProvider : public scorpio_utils::time_provider::TimeProvider {
   std::atomic<int64_t> _time;
+  std::atomic<int64_t> _time_offset;
 
 public:
   MockTimeProvider()
@@ -28,7 +28,12 @@ public:
     return _time.load(std::memory_order_relaxed);
   }
 
-  MOCK_METHOD(void, set_time_offset, (int64_t time), (noexcept));
-  MOCK_METHOD(int64_t, get_time_offset, (), (const noexcept));
+  void set_time_offset(int64_t time) noexcept {
+    _time_offset.store(time, std::memory_order_relaxed);
+  }
+
+  int64_t get_time_offset() const noexcept {
+    return _time_offset.load(std::memory_order_relaxed);
+  }
 };
 }  // namespace scorpio_utils::testing
