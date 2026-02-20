@@ -90,6 +90,7 @@ install(DIRECTORY
 )
 
 if(BUILD_TESTING)
+  add_compile_options(-g)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_gmock REQUIRED)
   ament_find_gmock()

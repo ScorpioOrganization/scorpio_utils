@@ -23,6 +23,7 @@
 #include <new>
 #include <utility>
 #include <typeinfo>
+#include <vector>
 
 #include "scorpio_utils/assert.hpp"
 #include "scorpio_utils/decorators.hpp"
@@ -185,5 +186,12 @@ SCU_CONST_FUNC constexpr T least_significant_bytes_to_val(T last_val, Y cur_val)
     return SCU_AS(T, SCU_AS(T, cur_val) | (significant_bytes + significant_bytes_increment_step));
   }
   return SCU_AS(T, SCU_AS(T, cur_val) | significant_bytes);
+}
+
+template<typename T, typename Allocator>
+void vec_reserve_at_least(std::vector<T, Allocator>& vec, const size_t additional_capacity) {
+  if (vec.capacity() - vec.size() < additional_capacity) {
+    vec.reserve(std::max(vec.size() + additional_capacity, vec.capacity() * 2));
+  }
 }
 }  // namespace scorpio_utils

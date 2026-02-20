@@ -33,7 +33,7 @@ public:
    * Gets the current time in nanoseconds.
    * \return Current time in nanoseconds.
    */
-  int64_t get_time() override {
+  int64_t get_time() const override {
     return std::chrono::system_clock::now().time_since_epoch().count();
   }
 };
