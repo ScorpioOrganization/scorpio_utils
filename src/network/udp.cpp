@@ -88,7 +88,7 @@ UdpSocket& UdpSocket::operator=(UdpSocket&& other) {
 }
 
 SCU_HOT Expected<size_t, std::string> UdpSocket::send(
-  uint8_t* data,
+  const uint8_t* data,
   size_t size,
   Ipv4 remote_ip,
   Port remote_port) const {
