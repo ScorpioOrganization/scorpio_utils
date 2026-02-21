@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cstdint>
 #include <chrono>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -65,6 +66,8 @@ public:
     UdpSocket& socket,
     std::shared_ptr<ScorpioUdp> connection
   ) = 0;
+  virtual std::string name() = 0;
+  virtual ~EventInTime() = default;
 };
 
 class NoOpEvent final : public EventInTime {
@@ -76,6 +79,30 @@ public:
   ) override {
     return Success();
   }
+  std::string name() override {
+    return "NoOpEvent";
+  }
+  ~NoOpEvent() override = default;
+};
+
+class SleepEvent final : public EventInTime {
+  const int64_t _sleep_time;
+
+public:
+  Expected<Success, std::string> execute(
+    int64_t,
+    UdpSocket&,
+    std::shared_ptr<ScorpioUdp>
+  ) override {
+    std::this_thread::sleep_for(std::chrono::nanoseconds(_sleep_time));
+    return Success();
+  }
+  std::string name() override {
+    return "SleepEvent";
+  }
+  explicit SleepEvent(int64_t sleep_time)
+  : _sleep_time(sleep_time) { }
+  ~SleepEvent() override = default;
 };
 
 class StartScorpioUdp final : public EventInTime {
@@ -91,10 +118,14 @@ public:
       return Unexpected("Failed to start connection"s);
     }
   }
+  std::string name() override {
+    return "StartScorpioUdp";
+  }
+  ~StartScorpioUdp() override = default;
 };
 
 class SetAutoAccept final : public EventInTime {
-  bool _auto_accept;
+  const bool _auto_accept;
 
 public:
   explicit SetAutoAccept(bool auto_accept)
@@ -108,11 +139,15 @@ public:
     connection->set_auto_accept(_auto_accept);
     return Success();
   }
+  std::string name() override {
+    return "SetAutoAccept(" + std::to_string(_auto_accept) + ")";
+  }
+  ~SetAutoAccept() override = default;
 };
 
 class StartListening final : public EventInTime {
-  Ipv4 _ip;
-  Port _port;
+  const Ipv4 _ip;
+  const Port _port;
 
 public:
   StartListening(Ipv4 ip, Port port)
@@ -129,11 +164,15 @@ public:
       return Unexpected("Failed to start listening"s);
     }
   }
+  std::string name() override {
+    return "StartListening(" + std::to_string(_ip.ip()) + ":" + std::to_string(_port) + ")";
+  }
+  ~StartListening() override = default;
 };
 
 class SendPacket final : public EventInTime {
-  Expected<UdpMessageInfo, std::string> _return_value;
-  std::vector<uint8_t> _data;
+  const Expected<UdpMessageInfo, std::string> _return_value;
+  const std::vector<uint8_t> _data;
 
 public:
   SendPacket(Ipv4 remote_ip, Port remote_port, std::vector<uint8_t> data)
@@ -147,12 +186,19 @@ public:
     socket.add_to_receive_queue<true>(_return_value, std::move(_data));
     return Success();
   }
+  std::string name() override {
+    return "SendPacket(" + std::to_string(_return_value.ok_value().remote_ip.ip()) + ":" +
+           std::to_string(_return_value.ok_value().remote_port) + ", " +
+           std::to_string(_return_value.ok_value().byte_count) +
+           " bytes)";
+  }
+  ~SendPacket() override = default;
 };
 
 class ExpectPacket final : public EventInTime {
-  Ipv4 _remote_ip;
-  Port _remote_port;
-  std::vector<uint8_t> _data;
+  const Ipv4 _remote_ip;
+  const Port _remote_port;
+  const std::vector<uint8_t> _data;
 
 public:
   ExpectPacket(Ipv4 remote_ip, Port remote_port, std::vector<uint8_t> data)
@@ -180,12 +226,90 @@ public:
     }
     return Unexpected("No packet was sent"s);
   }
+  std::string name() override {
+    return "ExpectPacket(" + std::to_string(_remote_ip.ip()) + ":" + std::to_string(_remote_port) + ", " +
+           std::to_string(_data.size()) + " bytes)";
+  }
+  ~ExpectPacket() override = default;
+};
+
+class ConnectionHandle final : public std::enable_shared_from_this<ConnectionHandle> {
+  std::optional<std::shared_ptr<ScorpioUdpConnection>> _connection;
+
+  ConnectionHandle() = default;
+
+public:
+  static std::shared_ptr<ConnectionHandle> create() {
+    return std::shared_ptr<ConnectionHandle>(new ConnectionHandle());
+  }
+
+  class GetConnection final : public EventInTime {
+    friend class ConnectionHandle;
+    const std::shared_ptr<ConnectionHandle> _handle;
+    const bool _expect_success;
+
+    explicit GetConnection(std::shared_ptr<ConnectionHandle> handle, bool expect_success)
+    : _handle(std::move(handle)), _expect_success{expect_success} { }
+
+public:
+    Expected<Success, std::string> execute(
+      int64_t,
+      UdpSocket&,
+      std::shared_ptr<ScorpioUdp> _scorpio_udp
+    ) override {
+      SCU_ASSERT(!_handle->_connection.has_value(), "Handle already contains a connection");
+      _handle->_connection = _scorpio_udp->get_accepted_connection();
+      if (SCU_UNLIKELY(_expect_success != _handle->_connection.has_value())) {
+        return "Expectation of success not met"s;
+      }
+      return Success();
+    }
+    std::string name() override {
+      return "GetConnection(expect_success=" + std::to_string(_expect_success) + ")";
+    }
+    ~GetConnection() override = default;
+  };
+
+  std::unique_ptr<GetConnection> get_connection(bool expect_success = true) {
+    return std::unique_ptr<GetConnection>(new GetConnection(shared_from_this(), expect_success));
+  }
+
+  class CloseConnection final : public EventInTime {
+    friend class ConnectionHandle;
+    const std::shared_ptr<ConnectionHandle> _handle;
+    const bool _expect_success;
+
+    explicit CloseConnection(std::shared_ptr<ConnectionHandle> handle, bool expect_success)
+    : _handle(std::move(handle)), _expect_success{expect_success} { }
+
+public:
+    Expected<Success, std::string> execute(
+      int64_t,
+      UdpSocket&,
+      std::shared_ptr<ScorpioUdp>
+    ) override {
+      SCU_ASSERT(_handle->_connection.has_value(), "Handle does not contain a connection");
+      if (SCU_UNLIKELY((*(_handle->_connection))->close() != _expect_success)) {
+        return "Expectation of success not met"s;
+      }
+      return Success();
+    }
+    std::string name() override {
+      return "CloseConnection(expect_success=" + std::to_string(_expect_success) + ")";
+    }
+    ~CloseConnection() override = default;
+  };
+
+  std::unique_ptr<CloseConnection> close_connection(bool expect_success = true) {
+    return std::unique_ptr<CloseConnection>(new CloseConnection(shared_from_this(), expect_success));
+  }
 };
 
 class ScorpioUdpTester : public ::testing::Test {
   std::shared_ptr<MockTimeProvider> _time_provider;
   std::unique_ptr<UdpSocket> _socket;
   std::shared_ptr<ScorpioUdp> _connection;
+  size_t _task_execution;
 
   SCU_ALWAYS_INLINE void stabilize_delay() {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -193,6 +317,7 @@ class ScorpioUdpTester : public ::testing::Test {
 
 protected:
   void SetUp() override {
+    _task_execution = 0;
     _socket = std::make_unique<decltype(_socket)::element_type>();
     _time_provider = get_time_provider();
     _time_provider->set_time(0);
@@ -208,6 +333,7 @@ protected:
     stabilize_delay();
     _socket.reset();
     _time_provider.reset();
+    _task_execution = 0;
   }
 
   void execute_test(const std::vector<std::pair<int64_t, std::unique_ptr<EventInTime>>>& events) {
@@ -225,15 +351,18 @@ protected:
       }
       auto result = event->execute(_time_provider->get_time(), *_socket, _connection);
       if (SCU_UNLIKELY(result.is_err())) {
-        EXPECT_TRUE(result) << "Test no.: " << i << " failed: " << result.err_value();
-        return;
+        FAIL() << "Test: " << event->name() << " no.: " << i << " in execution: " << _task_execution <<
+          " failed: " <<
+          result.err_value();
       }
       ++i;
     }
+    ++_task_execution;
   }
 };
 
 TEST_F(ScorpioUdpTester, create_connection) {
+  std::shared_ptr<ConnectionHandle> connection_handle = ConnectionHandle::create();
   std::vector<std::pair<int64_t, std::unique_ptr<EventInTime>>> events;
     events.emplace_back(0, std::make_unique<StartScorpioUdp>());
     events.emplace_back(0, std::make_unique<StartListening>(Ipv4(127, 0, 0, 1), 10001));
@@ -244,5 +373,10 @@ TEST_F(ScorpioUdpTester, create_connection) {
     events.emplace_back(TICK_TIME,
     std::make_unique<ExpectPacket>(Ipv4(127, 0, 0, 1), 12345,
     generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::ACCEPTED) })));
+    events.emplace_back(0, connection_handle->get_connection(true));
+    events.emplace_back(0, connection_handle->close_connection(true));
+    events.emplace_back(0,
+    std::make_unique<ExpectPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::DISCONNECT, { AS_BYTE(Code::DisconnectSubCommands::DISCONNECT) })));
   execute_test(events);
 }
