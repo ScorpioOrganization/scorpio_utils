@@ -247,6 +247,7 @@ private:
   SeqNumberComplement _sequence_complement;
   SeqNumber _last_greatest_sequence_number;
   std::string _panic_message;
+  std::mutex _panic_mutex;
 
 #if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
   void log_to_file(std::string&& message);
@@ -340,7 +341,6 @@ private:
   std::atomic<bool> _stop;
   std::shared_ptr<TimeProvider> _time_provider;
   std::atomic<int64_t> _last_received_packet_time;
-  std::thread _processing_thread;
   std::mutex _panic_mutex;
   threading::Signal _start_signal;
 
@@ -356,6 +356,7 @@ private:
   std::array<std::atomic<bool>, std::numeric_limits<StreamNumber>::max() + 1> _stream_exists;
   std::vector<std::weak_ptr<ScorpioUdpStream>> _streams_being_created;
   uint16_t _next_stream_to_heartbeat;
+  std::thread _processing_thread;
   std::shared_ptr<ScorpioUdpStream> get_stream(StreamNumber);
   void handle_new_packet(const MessageHeader& header, UdpData&& data);
   void pull_awaiting_streams(std::shared_ptr<scorpio_utils::network::ScorpioUdpStream> stream);
