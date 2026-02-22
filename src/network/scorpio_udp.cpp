@@ -169,6 +169,7 @@ ScorpioUdp::ScorpioUdp(
 #if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
   , _logger("scorpio_udp_log.txt")
 #endif
+  , _panic(false)
 {
   SUDP_LOG("ScorpioUdp created");
 }
@@ -686,13 +687,15 @@ ScorpioUdpConnection::ScorpioUdpConnection(Ipv4 remote_ip, Port remote_port, std
 : _remote_ip(remote_ip),
   _remote_port(remote_port),
   _sequence_number(0),
+  _panic(false),
   _state(State::NEW),
   _parent(std::move(parent)),
+  _auto_accept_stream(false),
   _stop(false),
   _time_provider(_parent->_time_provider),
   _last_received_packet_time(_time_provider->get_time()),
-  _processing_thread(&ScorpioUdpConnection::processing_thread, this),
-  _next_stream_to_heartbeat(0) {
+  _next_stream_to_heartbeat(0),
+  _processing_thread(&ScorpioUdpConnection::processing_thread, this) {
 }
 
 bool ScorpioUdpConnection::connected() {
@@ -1314,8 +1317,7 @@ SCU_HOT bool ScorpioUdpStream::send(Code code, const std::vector<uint8_t>& data)
 }
 
 SCU_COLD void ScorpioUdpStream::panic(std::string&& message) {
-  static std::mutex panic_mutex;
-  std::unique_lock<std::mutex> lock(panic_mutex, std::try_to_lock);
+  std::unique_lock<std::mutex> lock(_panic_mutex, std::try_to_lock);
   if (!lock.owns_lock()) {
     // Lock mutex to delay returning from panic so, there is _panic_message set
     lock.lock();

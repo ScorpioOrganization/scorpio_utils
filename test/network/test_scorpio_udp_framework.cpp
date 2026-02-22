@@ -401,7 +401,7 @@ class ScorpioUdpTester : public ::testing::Test {
   std::shared_ptr<ScorpioUdp> _connection;
   size_t _task_execution;
 
-  SCU_ALWAYS_INLINE void stabilize_delay() {
+  static SCU_ALWAYS_INLINE void stabilize_delay() {
     std::this_thread::sleep_for(std::chrono::nanoseconds(TICK_TIME));
   }
 
@@ -418,12 +418,12 @@ protected:
   void TearDown() override {
     _time_provider->advance_time(TIMEOUT * 1000000000);
     stabilize_delay();
+    _socket->close_channels();
     _connection.reset();
     _time_provider->advance_time(TIMEOUT * 1000000000);
     stabilize_delay();
     _socket.reset();
     _time_provider.reset();
-    _task_execution = 0;
   }
 
   void execute_test(const std::vector<EventQueueItem>& events) {
@@ -454,18 +454,18 @@ protected:
 TEST_F(ScorpioUdpTester, connect_and_get_closed) {
   std::shared_ptr<ConnectionHandle> connection_handle = ConnectionHandle::create();
   std::vector<EventQueueItem> events;
-    events.push_back({ WHERE, 0, std::make_unique<StartScorpioUdp>() });
-    events.push_back({ WHERE, 0, connection_handle->create_connection(Ipv4(127, 0, 0, 1), 12345) });
-    events.push_back({ WHERE, TICK_TIME, std::make_unique<ExpectPacket>(Ipv4(127, 0, 0, 1), 12345,
-    generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) })) });
-    events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
-    generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::ACCEPTED) })) });
-    events.push_back({ WHERE, 0, connection_handle->connection_is_alive(true) });
-    events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
-    generate_single_packet(Code::DISCONNECT, { AS_BYTE(Code::DisconnectSubCommands::DISCONNECT) })) });
-    events.push_back({ WHERE, TICK_TIME,
+  events.push_back({ WHERE, 0, std::make_unique<StartScorpioUdp>() });
+  events.push_back({ WHERE, 0, connection_handle->create_connection(Ipv4(127, 0, 0, 1), 12345) });
+  events.push_back({ WHERE, TICK_TIME, std::make_unique<ExpectPacket>(Ipv4(127, 0, 0, 1), 12345,
+  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) })) });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::ACCEPTED) })) });
+  events.push_back({ WHERE, 0, connection_handle->connection_is_alive(true) });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+  generate_single_packet(Code::DISCONNECT, { AS_BYTE(Code::DisconnectSubCommands::DISCONNECT) })) });
+  events.push_back({ WHERE, TICK_TIME,
       std::make_unique<ExpectPacket>(Ipv4(127, 0, 0, 1), 12345,
-    generate_single_packet(Code::DISCONNECT, { AS_BYTE(Code::DisconnectSubCommands::ACCEPTED) })) });
+  generate_single_packet(Code::DISCONNECT, { AS_BYTE(Code::DisconnectSubCommands::ACCEPTED) })) });
   execute_test(events);
 }
 
@@ -475,14 +475,30 @@ TEST_F(ScorpioUdpTester, accept_connection_and_close) {
   events.push_back({ WHERE, 0, std::make_unique<StartScorpioUdp>() });
   events.push_back({ WHERE, 0, std::make_unique<StartListening>(Ipv4(127, 0, 0, 1), 10001) });
   events.push_back({ WHERE, 0, std::make_unique<SetAutoAccept>(true) });
+  events.push_back({ WHERE, TICK_TIME * 4, std::make_unique<SleepEvent>(TICK_TIME * 4) });
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
   generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) })) });
-  events.push_back({ WHERE, TICK_TIME, std::make_unique<SleepEvent>(TICK_TIME) });
+  events.push_back({ WHERE, TICK_TIME * 4, std::make_unique<SleepEvent>(TICK_TIME * 4) });
   events.push_back({ WHERE, 0, std::make_unique<ExpectPacket>(Ipv4(127, 0, 0, 1), 12345,
   generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::ACCEPTED) })) });
   events.push_back({ WHERE, 0, connection_handle->get_connection(true) });
   events.push_back({ WHERE, 0, connection_handle->close_connection(true) });
   events.push_back({ WHERE, 0, std::make_unique<ExpectPacket>(Ipv4(127, 0, 0, 1), 12345,
   generate_single_packet(Code::DISCONNECT, { AS_BYTE(Code::DisconnectSubCommands::DISCONNECT) })) });
+  execute_test(events);
+}
+
+TEST_F(ScorpioUdpTester, reject_connection) {
+  std::shared_ptr<ConnectionHandle> connection_handle = ConnectionHandle::create();
+  std::vector<EventQueueItem> events;
+  events.push_back({ WHERE, 0, std::make_unique<StartScorpioUdp>() });
+  events.push_back({ WHERE, 0, std::make_unique<StartListening>(Ipv4(127, 0, 0, 1), 10001) });
+  events.push_back({ WHERE, 0, std::make_unique<SetAutoAccept>(false) });
+  events.push_back({ WHERE, TICK_TIME * 4, std::make_unique<SleepEvent>(TICK_TIME * 4) });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) })) });
+  events.push_back({ WHERE, TICK_TIME * 4, std::make_unique<SleepEvent>(TICK_TIME * 4) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacket>(Ipv4(127, 0, 0, 1), 12345,
+  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::REJECTED) })) });
   execute_test(events);
 }
