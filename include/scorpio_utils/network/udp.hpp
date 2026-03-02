@@ -67,7 +67,9 @@ public:
   : _is_open(false), _is_bound(false) { }
   explicit UdpSocket(bool open)
   : _is_open(open), _is_bound(false) { }
-  virtual ~UdpSocket() = default;
+  virtual ~UdpSocket() noexcept {
+    close_channels();
+  }
 
   SCU_ALWAYS_INLINE auto is_open() const noexcept {
     return _is_open.load(std::memory_order_relaxed);
