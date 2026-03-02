@@ -245,6 +245,7 @@ public:
 };
 
 class ConnectionHandle final : public std::enable_shared_from_this<ConnectionHandle> {
+  friend class StreamHandle;
   std::optional<std::shared_ptr<ScorpioUdpConnection>> _connection;
 
   ConnectionHandle() = default;
@@ -374,11 +375,44 @@ public:
   std::unique_ptr<ConnectionIsAlive> connection_is_alive(bool expect_alive = true) {
     return std::unique_ptr<ConnectionIsAlive>(new ConnectionIsAlive(shared_from_this(), expect_alive));
   }
+
+  class ConnectionAutoAcceptStream final : public EventInTime {
+    friend class ConnectionHandle;
+    const std::shared_ptr<ConnectionHandle> _handle;
+    const bool _auto_accept;
+
+    explicit ConnectionAutoAcceptStream(std::shared_ptr<ConnectionHandle> handle, bool auto_accept)
+    : _handle(std::move(handle)), _auto_accept{auto_accept} { }
+
+public:
+    Expected<Success, std::string> execute(
+      int64_t,
+      UdpSocket&,
+      std::shared_ptr<ScorpioUdp>
+    ) override {
+      SCU_ASSERT(_handle->_connection.has_value(), "Handle does not contain a connection");
+      (*(_handle->_connection))->set_auto_accept_stream(_auto_accept);
+      return Success();
+    }
+    std::string name() override {
+      return "ConnectionAutoAcceptStream(auto_accept=" + std::to_string(_auto_accept) + ")";
+    }
+    ~ConnectionAutoAcceptStream() override = default;
+  };
+
+  std::unique_ptr<ConnectionAutoAcceptStream> connection_auto_accept_streams(bool auto_accept = true) {
+    return std::unique_ptr<ConnectionAutoAcceptStream>(new ConnectionAutoAcceptStream(shared_from_this(), auto_accept));
+  }
 };
 
 class StreamHandle final : public std::enable_shared_from_this<StreamHandle> {
   const std::shared_ptr<ConnectionHandle> _connection_handle;
   std::optional<std::shared_ptr<ScorpioUdpStream>> _stream;
+
+  auto get_connection() const {
+    SCU_ASSERT(_connection_handle->_connection.has_value(), "Connection handle does not contain a connection");
+    return *_connection_handle->_connection;
+  }
 
   explicit StreamHandle(const std::shared_ptr<ConnectionHandle>& connection_handle)
   : _connection_handle(connection_handle) { }
@@ -386,6 +420,98 @@ class StreamHandle final : public std::enable_shared_from_this<StreamHandle> {
 public:
   static std::shared_ptr<StreamHandle> create(const std::shared_ptr<ConnectionHandle>& connection_handle) {
     return std::shared_ptr<StreamHandle>(new StreamHandle(connection_handle));
+  }
+
+  class GetStream final : public EventInTime {
+    friend class StreamHandle;
+    const std::shared_ptr<StreamHandle> _handle;
+    const bool _expect_success;
+
+    explicit GetStream(std::shared_ptr<StreamHandle> handle, bool expect_success)
+    : _handle(std::move(handle)), _expect_success{expect_success} { }
+
+public:
+    Expected<Success, std::string> execute(
+      int64_t,
+      UdpSocket&,
+      std::shared_ptr<ScorpioUdp>
+    ) override {
+      SCU_ASSERT(!_handle->_stream.has_value(), "Handle already contains a stream");
+      _handle->_stream = _handle->get_connection()->get_accepted_stream();
+      if (SCU_UNLIKELY(_expect_success != _handle->_stream.has_value())) {
+        return "Expectation of success not met"s;
+      }
+      return Success();
+    }
+    std::string name() override {
+      return "GetStream(expect_success=" + std::to_string(_expect_success) + ")";
+    }
+    ~GetStream() override = default;
+  };
+
+  std::unique_ptr<GetStream> get_stream(bool expect_success = true) {
+    return std::unique_ptr<GetStream>(new GetStream(shared_from_this(), expect_success));
+  }
+
+  class CreateStreamEvent final : public EventInTime {
+    friend class StreamHandle;
+    const std::shared_ptr<StreamHandle> _handle;
+    const StreamNumber _stream_id;
+    const ScorpioUdpStream::StreamQoS _stream_qos;
+
+    explicit CreateStreamEvent(
+      std::shared_ptr<StreamHandle> handle, StreamNumber stream_id,
+      ScorpioUdpStream::StreamQoS stream_qos)
+    : _handle(std::move(handle)), _stream_id(stream_id), _stream_qos(stream_qos) { }
+
+public:
+    Expected<Success, std::string> execute(
+      int64_t,
+      UdpSocket&,
+      std::shared_ptr<ScorpioUdp>
+    ) override {
+      SCU_ASSERT(!_handle->_stream.has_value(), "Handle already contains a stream");
+      _handle->_stream = _handle->get_connection()->create_stream(_stream_id, _stream_qos);
+      return Success();
+    }
+    std::string name() override {
+      return "CreateStreamEvent(stream_id=" + std::to_string(_stream_id) + ", stream_qos={depth=" + std::to_string(
+        _stream_qos.depth) + ", reliability=" + std::to_string(SCU_AS(int, _stream_qos.reliability)) + "})";
+    }
+    ~CreateStreamEvent() override = default;
+  };
+
+  std::unique_ptr<CreateStreamEvent> create_stream(StreamNumber stream_id, ScorpioUdpStream::StreamQoS stream_qos) {
+    return std::unique_ptr<CreateStreamEvent>(new CreateStreamEvent(shared_from_this(), stream_id, stream_qos));
+  }
+
+  class CloseStream final : public EventInTime {
+    friend class StreamHandle;
+    const std::shared_ptr<StreamHandle> _handle;
+    const bool _expect_success;
+
+    explicit CloseStream(std::shared_ptr<StreamHandle> handle, bool expect_success)
+    : _handle(std::move(handle)), _expect_success{expect_success} { }
+
+public:
+    Expected<Success, std::string> execute(
+      int64_t,
+      UdpSocket&,
+      std::shared_ptr<ScorpioUdp>) override {
+      SCU_ASSERT(_handle->_stream.has_value(), "Handle does not contain a stream");
+      if (SCU_UNLIKELY((*(_handle->_stream))->close() != _expect_success)) {
+        return "Expectation of success not met"s;
+      }
+      return Success();
+    }
+    std::string name() override {
+      return "CloseStream(expect_success=" + std::to_string(_expect_success) + ")";
+    }
+    ~CloseStream() override = default;
+  };
+
+  std::unique_ptr<CloseStream> close_stream(bool expect_success = true) {
+    return std::unique_ptr<CloseStream>(new CloseStream(shared_from_this(), expect_success));
   }
 };
 
@@ -500,5 +626,28 @@ TEST_F(ScorpioUdpTester, reject_connection) {
   events.push_back({ WHERE, TICK_TIME * 4, std::make_unique<SleepEvent>(TICK_TIME * 4) });
   events.push_back({ WHERE, 0, std::make_unique<ExpectPacket>(Ipv4(127, 0, 0, 1), 12345,
   generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::REJECTED) })) });
+  execute_test(events);
+}
+
+TEST_F(ScorpioUdpTester, accept_connection_and_get_stream) {
+  std::shared_ptr<ConnectionHandle> connection_handle = ConnectionHandle::create();
+  std::shared_ptr<StreamHandle> stream_handle = StreamHandle::create(connection_handle);
+  std::vector<EventQueueItem> events;
+  events.push_back({ WHERE, 0, std::make_unique<StartScorpioUdp>() });
+  events.push_back({ WHERE, 0, std::make_unique<StartListening>(Ipv4(127, 0, 0, 1), 10001) });
+  events.push_back({ WHERE, 0, std::make_unique<SetAutoAccept>(true) });
+  events.push_back({ WHERE, TICK_TIME * 4, std::make_unique<SleepEvent>(TICK_TIME * 4) });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) })) });
+  events.push_back({ WHERE, TICK_TIME * 4, std::make_unique<SleepEvent>(TICK_TIME * 4) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacket>(Ipv4(127, 0, 0, 1), 12345,
+  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::ACCEPTED) })) });
+  events.push_back({ WHERE, 0, connection_handle->get_connection(true) });
+  events.push_back({ WHERE, 0, connection_handle->connection_auto_accept_streams(true) });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+  generate_single_packet(Code::CREATE_STREAM,
+      { AS_BYTE(Code::CreateStreamSubCommands::CREATE), 0x01, 0x00, 0x00, 0x00 })) });
+  events.push_back({ WHERE, TICK_TIME * 4, std::make_unique<SleepEvent>(TICK_TIME * 4) });
+  events.push_back({ WHERE, 0, stream_handle->get_stream(true) });
   execute_test(events);
 }
