@@ -18,13 +18,17 @@
 
 #pragma once
 
+#include <algorithm>
+#include <limits>
 #include <new>
+#include <vector>
 
 #include "scorpio_utils/decorators.hpp"
+#include "scorpio_utils/sat_math.hpp"
 
 namespace scorpio_utils {
 template<typename T>
-SCU_ALWAYS_INLINE SCU_CONST_FUNC T clone(T v) {
+SCU_ALWAYS_INLINE SCU_PURE T clone(T v) {
   return v;
 }
 
@@ -46,4 +50,34 @@ VisitorOverloadingHelper(T ...)->VisitorOverloadingHelper<T...>;
 #else
 # define SCU_HARDWARE_DESTRUCTIVE_INTERFERENCE_SIZE 64
 #endif
+
+template<typename T, typename Y>
+SCU_CONST_FUNC constexpr T least_significant_bytes_to_val(T last_val, Y cur_val) noexcept {
+  static_assert(sizeof(T) >= sizeof(Y));
+  // Mask that takes bytes from size_t that are not included to SeqNumber
+  // This excessive casting is actually necessary because apparently ~SCU_AS(uint8_t, 0) will be promoted to int
+  constexpr T significant_bytes_mask = SCU_AS(T, ~SCU_AS(T, SCU_AS(Y, ~SCU_AS(Y, 0))));
+  constexpr T significant_bytes_increment_step = SCU_AS(T, SCU_AS(T, 1) << SCU_AS(T, (sizeof(Y) * 8)));
+  const auto current_trimmed = SCU_AS(Y, last_val);
+  if (sat_sub(cur_val, current_trimmed) > (std::numeric_limits<Y>::max() / 2)) {
+    constexpr auto step_size = SCU_AS(T, SCU_AS(T, std::numeric_limits<Y>::max()) + 1);
+    return SCU_AS(T, ((last_val & significant_bytes_mask) | cur_val) - step_size);
+  }
+  if (sat_sub(current_trimmed, cur_val) < (std::numeric_limits<Y>::max() / 2)) {
+    return SCU_AS(T, (last_val & significant_bytes_mask) | cur_val);
+  }
+  // Static cast and truncating bytes is intentional
+  const auto significant_bytes = significant_bytes_mask & last_val;
+  if (cur_val < current_trimmed) {
+    return SCU_AS(T, SCU_AS(T, cur_val) | (significant_bytes + significant_bytes_increment_step));
+  }
+  return SCU_AS(T, SCU_AS(T, cur_val) | significant_bytes);
+}
+
+template<typename T, typename Allocator>
+void vec_reserve_at_least(std::vector<T, Allocator>& vec, const size_t additional_capacity) {
+  if (vec.capacity() - vec.size() < additional_capacity) {
+    vec.reserve(std::max(vec.size() + additional_capacity, vec.capacity() * 2));
+  }
+}
 }  // namespace scorpio_utils

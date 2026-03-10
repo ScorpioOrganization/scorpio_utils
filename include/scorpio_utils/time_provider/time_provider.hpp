@@ -33,6 +33,6 @@ public:
    * Gets the current time in nanoseconds.
    * \return Current time in nanoseconds.
    */
-  virtual int64_t get_time() = 0;
+  virtual int64_t get_time() const = 0;
 };
 }  // namespace scorpio_utils::time_provider

@@ -39,7 +39,7 @@ class MockTimeProvider : public TimeProvider {
   std::atomic<int64_t> _current_time{ 0 };
 
 public:
-  int64_t get_time() override {
+  int64_t get_time() const override {
     return _current_time.load();
   }
 
