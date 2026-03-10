@@ -436,6 +436,9 @@ public:
   SCU_ALWAYS_INLINE auto is_alive() const noexcept {
     return _state.load(std::memory_order_relaxed) <= State::CONNECTED;
   }
+  SCU_ALWAYS_INLINE auto last_received_packet_time() const noexcept {
+    return _last_received_packet_time.load(std::memory_order_relaxed);
+  }
 };
 
 class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
