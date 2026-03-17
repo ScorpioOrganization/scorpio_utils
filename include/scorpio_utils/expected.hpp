@@ -93,14 +93,14 @@ public:
   }
 
   constexpr std::optional<E> err() && {
-    if (SCU_UNLIKELY(is_ok())) {
+    if (SCU_LIKELY(is_ok())) {
       return std::nullopt;
     }
     return std::get<error_type>(std::move(*this));
   }
 
   constexpr std::optional<std::reference_wrapper<const E>> err() const& {
-    if (SCU_UNLIKELY(is_ok())) {
+    if (SCU_LIKELY(is_ok())) {
       return std::nullopt;
     }
     return std::cref(std::get<error_type>(*this));
