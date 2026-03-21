@@ -33,61 +33,47 @@ public:
 #include "scorpio_utils/defer.hpp"
 #include "scorpio_utils/misc.hpp"
 
-TEST(DynamicAs, unique_ptr_success) {
-  struct Base { virtual ~Base() = default; };
-  struct Derived : Base { ~Derived() override = default; };
+struct Base { virtual ~Base() = default; };
+struct Derived : Base { ~Derived() override = default; };
+struct Derived2 : Base { ~Derived2() override = default; };
 
+TEST(DynamicAs, unique_ptr_success) {
   std::unique_ptr<Base> base_ptr = std::make_unique<Derived>();
   auto derived_ptr = scorpio_utils::dynamic_as<Derived>(std::move(base_ptr));
   EXPECT_NE(derived_ptr, nullptr) << "dynamic_as should successfully cast unique_ptr<Base> to unique_ptr<Derived>";
 }
 
 TEST(DynamicAs, unique_ptr_failed) {
-  struct Base { virtual ~Base() = default; };
-  struct Derived { };
-
-  std::unique_ptr<Base> base_ptr = std::make_unique<Base>();
+  std::unique_ptr<Base> base_ptr = std::make_unique<Derived2>();
   EXPECT_THROW(scorpio_utils::dynamic_as<Derived>(std::move(base_ptr)),
     FailedAssertionException) <<
     "dynamic_as should throw an exception when casting unique_ptr<Base> to unique_ptr<Derived>";
 }
 
 TEST(DynamicAs, shared_ptr_success) {
-  struct Base { virtual ~Base() = default; };
-  struct Derived : Base { ~Derived() override = default; };
-
   std::shared_ptr<Base> base_ptr = std::make_shared<Derived>();
   auto derived_ptr = scorpio_utils::dynamic_as<Derived>(std::move(base_ptr));
   EXPECT_NE(derived_ptr, nullptr) << "dynamic_as should successfully cast shared_ptr<Base> to shared_ptr<Derived>";
 }
 
 TEST(DynamicAs, shared_ptr_failed) {
-  struct Base { virtual ~Base() = default; };
-  struct Derived { };
-
-  std::shared_ptr<Base> base_ptr = std::make_shared<Base>();
+  std::shared_ptr<Base> base_ptr = std::make_shared<Derived2>();
   EXPECT_THROW(scorpio_utils::dynamic_as<Derived>(std::move(base_ptr)),
     FailedAssertionException) <<
     "dynamic_as should throw an exception when casting shared_ptr<Base> to shared_ptr<Derived>";
 }
 
 TEST(DynamicAs, raw_ptr_success) {
-  struct Base { virtual ~Base() = default; };
-  struct Derived : Base { ~Derived() override = default; };
-
   Base* const base_ptr = new Derived;
   SCU_DEFER([base_ptr] { delete base_ptr; });
   auto derived_ptr = scorpio_utils::dynamic_as<Derived>(std::move(base_ptr));
-  EXPECT_NE(derived_ptr, nullptr) << "dynamic_as should successfully cast shared_ptr<Base> to shared_ptr<Derived>";
+  EXPECT_NE(derived_ptr, nullptr) << "dynamic_as should successfully cast Base* to Derived*";
 }
 
 TEST(DynamicAs, raw_ptr_failed) {
-  struct Base { virtual ~Base() = default; };
-  struct Derived { };
-
-  Base* const base_ptr = new Base;
+  Base* const base_ptr = new Derived2;
   SCU_DEFER([base_ptr] { delete base_ptr; });
   EXPECT_THROW(scorpio_utils::dynamic_as<Derived>(std::move(base_ptr)),
     FailedAssertionException) <<
-    "dynamic_as should throw an exception when casting shared_ptr<Base> to shared_ptr<Derived>";
+    "dynamic_as should throw an exception when casting Base* to Derived*";
 }

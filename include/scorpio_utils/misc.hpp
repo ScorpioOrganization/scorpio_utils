@@ -55,14 +55,15 @@ template<typename To, typename From>
 SCU_PURE SCU_ALWAYS_INLINE auto dynamic_as(From&& from) {
   static_assert(!std::is_reference_v<To>, "dynamic_as does not support reference types");
   if constexpr (is_unique_ptr_v<std::decay_t<From>>) {
-    static_assert(IsUniquePtr<From>::is_polymorphic,
+    static_assert(IsUniquePtr<std::decay_t<From>>::is_polymorphic,
                   "dynamic_as requires polymorphic types when used with unique_ptr");
-    auto result = dynamic_cast<To*>(from.release());
+    auto result = dynamic_cast<To*>(from.get());
     SCU_ASSERT(result != nullptr,
         "dynamic_as failed to cast from " << typeid(From).name() << " to " << typeid(To).name());
+    from.release();
     return std::unique_ptr<To>(result);
   } else if constexpr (is_shared_ptr_v<std::decay_t<From>>) {
-    static_assert(IsSharedPtr<From>::is_polymorphic,
+    static_assert(IsSharedPtr<std::decay_t<From>>::is_polymorphic,
                   "dynamic_as requires polymorphic types when used with shared_ptr");
     auto result = std::dynamic_pointer_cast<To>(std::forward<From>(from));
     SCU_ASSERT(result != nullptr,
