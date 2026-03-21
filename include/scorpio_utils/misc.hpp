@@ -18,9 +18,13 @@
 
 #pragma once
 
+#include <memory>
 #include <new>
+#include <utility>
 
+#include "scorpio_utils/assert.hpp"
 #include "scorpio_utils/decorators.hpp"
+#include "scorpio_utils/type_traits.hpp"
 
 namespace scorpio_utils {
 template<typename T>
@@ -46,4 +50,39 @@ VisitorOverloadingHelper(T ...)->VisitorOverloadingHelper<T...>;
 #else
 # define SCU_HARDWARE_DESTRUCTIVE_INTERFERENCE_SIZE 64
 #endif
+
+template<typename To, typename From>
+SCU_PURE SCU_ALWAYS_INLINE auto dynamic_as(From&& from) {
+  static_assert(!std::is_reference_v<To>, "dynamic_as does not support reference types");
+  if constexpr (is_unique_ptr_v<std::decay_t<From>>) {
+    static_assert(IsUniquePtr<From>::is_polymorphic,
+                  "dynamic_as requires polymorphic types when used with unique_ptr");
+    auto result = dynamic_cast<To*>(from.release());
+    SCU_ASSERT(result != nullptr,
+        "dynamic_as failed to cast from " << typeid(From).name() << " to " << typeid(To).name());
+    return std::unique_ptr<To>(result);
+  } else if constexpr (is_shared_ptr_v<std::decay_t<From>>) {
+    static_assert(IsSharedPtr<From>::is_polymorphic,
+                  "dynamic_as requires polymorphic types when used with shared_ptr");
+    auto result = std::dynamic_pointer_cast<To>(std::forward<From>(from));
+    SCU_ASSERT(result != nullptr,
+        "dynamic_as failed to cast from " << typeid(From).name() << " to " << typeid(To).name());
+    return result;
+  } else if constexpr (std::is_pointer_v<std::decay_t<From>>) {
+    static_assert(std::is_polymorphic_v<std::decay_t<std::remove_pointer_t<std::decay_t<From>>>>,
+                  "dynamic_as requires polymorphic types when used with raw pointers");
+    auto result = dynamic_cast<To*>(from);
+    SCU_ASSERT(result != nullptr,
+        "dynamic_as failed to cast from " << typeid(From).name() << " to " << typeid(To).name());
+    return result;
+  } else {
+    static_assert(
+      is_unique_ptr_v<std::decay_t<From>>||
+      is_shared_ptr_v<std::decay_t<From>>||
+      std::is_pointer_v<std::decay_t<From>>||
+      std::is_same_v<To, From>,
+      "dynamic_as can only be used for pointer (raw or shared) types or when To and From are the same type");
+    return from;
+  }
+}
 }  // namespace scorpio_utils
