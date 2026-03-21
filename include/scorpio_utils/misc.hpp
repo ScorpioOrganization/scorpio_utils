@@ -21,6 +21,7 @@
 #include <memory>
 #include <new>
 #include <utility>
+#include <typeinfo>
 
 #include "scorpio_utils/assert.hpp"
 #include "scorpio_utils/decorators.hpp"
@@ -51,39 +52,89 @@ VisitorOverloadingHelper(T ...)->VisitorOverloadingHelper<T...>;
 # define SCU_HARDWARE_DESTRUCTIVE_INTERFERENCE_SIZE 64
 #endif
 
+/**
+ * A utility function to perform dynamic_cast on smart pointers and raw pointers.
+ * This function can be used to cast a pointer of one type to another type,
+ * while ensuring that the cast is valid at runtime. The function supports std::unique_ptr, std::shared_ptr,
+ * and raw pointers. It will assert if the cast is not valid. The function also preserves
+ * the const and volatile qualifiers of the input pointer in the output pointer.
+ *
+ * \note When `from == nullptr`, the function will return `nullptr` without performing any cast or assertion.
+ * \note When using with std::unique_ptr, the input pointer must be passed by value to ensure the ownership transfer.
+ *       The function will release the ownership of the input pointer and return a new std::unique_ptr with the casted pointer.
+ *
+ * \tparam To The type to cast to.
+ * \tparam From The type to cast from.
+ *
+ * \param from The pointer to cast.
+ *
+ * \return The casted pointer.
+ */
 template<typename To, typename From>
-SCU_PURE SCU_ALWAYS_INLINE auto dynamic_as(From&& from) {
+SCU_ALWAYS_INLINE auto dynamic_as(From&& from) {
   static_assert(!std::is_reference_v<To>, "dynamic_as does not support reference types");
-  if constexpr (is_unique_ptr_v<std::decay_t<From>>) {
-    static_assert(IsUniquePtr<std::decay_t<From>>::is_polymorphic,
+  static_assert(!std::is_const_v<To>|| std::is_volatile_v<To>, "dynamic_as takes cv qualification from the From type");
+  using DecayedFrom = std::decay_t<From>;
+  #define SCU_DYNAMIC_AS_TARGET_TYPE(SourceType) \
+  std::conditional_t< \
+    std::is_volatile_v<SourceType>, \
+    std::add_volatile_t< \
+      std::conditional_t< \
+        std::is_const_v<SourceType>, \
+        std::add_const_t<To>, \
+        To \
+      >>, \
+    std::conditional_t< \
+      std::is_const_v<SourceType>, \
+      std::add_const_t<To>, \
+      To \
+    > \
+  >
+  if constexpr (is_unique_ptr_v<DecayedFrom>) {
+    static_assert(IsUniquePtr<DecayedFrom>::is_polymorphic,
                   "dynamic_as requires polymorphic types when used with unique_ptr");
-    auto result = dynamic_cast<To*>(from.get());
+    static_assert(!std::is_lvalue_reference_v<From>,
+                  "dynamic_as requires to pass unique_ptr by value to ensure the ownership transfer");
+    static_assert(!std::is_const_v<From>,
+                  "dynamic_as does not support const unique_ptr since it cannot transfer ownership");
+    using TargetType = SCU_DYNAMIC_AS_TARGET_TYPE(typename IsUniquePtr<DecayedFrom>::ElementType);
+    if (from.get() == nullptr) {
+      return std::unique_ptr<TargetType>(nullptr);
+    }
+    auto result = dynamic_cast<std::add_pointer_t<TargetType>>(from.get());
     SCU_ASSERT(result != nullptr,
         "dynamic_as failed to cast from " << typeid(From).name() << " to " << typeid(To).name());
     from.release();
-    return std::unique_ptr<To>(result);
-  } else if constexpr (is_shared_ptr_v<std::decay_t<From>>) {
-    static_assert(IsSharedPtr<std::decay_t<From>>::is_polymorphic,
+    return std::unique_ptr<TargetType>(result);
+  } else if constexpr (is_shared_ptr_v<DecayedFrom>) {
+    static_assert(IsSharedPtr<DecayedFrom>::is_polymorphic,
                   "dynamic_as requires polymorphic types when used with shared_ptr");
-    auto result = std::dynamic_pointer_cast<To>(std::forward<From>(from));
+    using TargetType = SCU_DYNAMIC_AS_TARGET_TYPE(typename IsSharedPtr<DecayedFrom>::ElementType);
+    if (from.get() == nullptr) {
+      return std::shared_ptr<TargetType>(nullptr);
+    }
+    auto result = std::dynamic_pointer_cast<TargetType>(std::forward<From>(from));
     SCU_ASSERT(result != nullptr,
         "dynamic_as failed to cast from " << typeid(From).name() << " to " << typeid(To).name());
     return result;
-  } else if constexpr (std::is_pointer_v<std::decay_t<From>>) {
-    static_assert(std::is_polymorphic_v<std::decay_t<std::remove_pointer_t<std::decay_t<From>>>>,
+  } else if constexpr (std::is_pointer_v<DecayedFrom>) {
+    static_assert(std::is_polymorphic_v<std::decay_t<std::remove_pointer_t<DecayedFrom>>>,
                   "dynamic_as requires polymorphic types when used with raw pointers");
-    auto result = dynamic_cast<To*>(from);
+    using TargetType = SCU_DYNAMIC_AS_TARGET_TYPE(std::remove_pointer_t<DecayedFrom>);
+    if (from == nullptr) {
+      return static_cast<std::add_pointer_t<TargetType>>(nullptr);
+    }
+    auto result = dynamic_cast<std::add_pointer_t<TargetType>>(from);
     SCU_ASSERT(result != nullptr,
         "dynamic_as failed to cast from " << typeid(From).name() << " to " << typeid(To).name());
     return result;
   } else {
     static_assert(
-      is_unique_ptr_v<std::decay_t<From>>||
-      is_shared_ptr_v<std::decay_t<From>>||
-      std::is_pointer_v<std::decay_t<From>>||
-      std::is_same_v<To, From>,
-      "dynamic_as can only be used for pointer (raw or shared) types or when To and From are the same type");
-    return from;
+      is_unique_ptr_v<DecayedFrom>||
+      is_shared_ptr_v<DecayedFrom>||
+      std::is_pointer_v<DecayedFrom>||
+      "dynamic_as can only be used for pointer (raw or shared) types");
   }
+  #undef SCU_DYNAMIC_AS_TARGET_TYPE
 }
 }  // namespace scorpio_utils

@@ -18,6 +18,7 @@
 
 #include <gtest/gtest.h>
 
+#include <stdexcept>
 #include <memory>
 
 class FailedAssertionException : public std::runtime_error {
@@ -36,6 +37,67 @@ public:
 struct Base { virtual ~Base() = default; };
 struct Derived : Base { ~Derived() override = default; };
 struct Derived2 : Base { ~Derived2() override = default; };
+
+static_assert(
+  std::is_same_v<decltype(scorpio_utils::dynamic_as<Derived>(std::declval<std::unique_ptr<Base>>())),
+  std::unique_ptr<Derived>>,
+  "dynamic_as should preserve cv qualification from the From type");
+
+static_assert(
+  std::is_same_v<decltype(scorpio_utils::dynamic_as<Derived>(std::declval<std::unique_ptr<const Base>>())),
+  std::unique_ptr<const Derived>>,
+  "dynamic_as should preserve cv qualification from the From type");
+
+static_assert(
+  std::is_same_v<decltype(scorpio_utils::dynamic_as<Derived>(std::declval<std::unique_ptr<volatile Base>>())),
+  std::unique_ptr<volatile Derived>>,
+  "dynamic_as should preserve cv qualification from the From type");
+
+static_assert(
+  std::is_same_v<decltype(scorpio_utils::dynamic_as<Derived>(std::declval<std::unique_ptr<const volatile Base>>())),
+  std::unique_ptr<const volatile Derived>>,
+  "dynamic_as should preserve cv qualification from the From type");
+
+static_assert(
+  std::is_same_v<decltype(scorpio_utils::dynamic_as<Derived>(std::declval<const std::shared_ptr<Base>>())),
+  std::shared_ptr<Derived>>,
+  "dynamic_as should preserve cv qualification from the From type");
+
+static_assert(
+  std::is_same_v<decltype(scorpio_utils::dynamic_as<Derived>(std::declval<std::shared_ptr<const Base>>())),
+  std::shared_ptr<const Derived>>,
+  "dynamic_as should preserve cv qualification from the From type");
+
+static_assert(
+  std::is_same_v<decltype(scorpio_utils::dynamic_as<Derived>(std::declval<const std::shared_ptr<volatile Base>>())),
+  std::shared_ptr<volatile Derived>>,
+  "dynamic_as should preserve cv qualification from the From type");
+
+static_assert(
+  std::is_same_v<decltype(scorpio_utils::dynamic_as<Derived>(std::declval<std::shared_ptr<const volatile Base>>())),
+  std::shared_ptr<const volatile Derived>>,
+  "dynamic_as should preserve cv qualification from the From type");
+
+static_assert(
+  std::is_same_v<decltype(scorpio_utils::dynamic_as<Derived>(std::declval<Base* const volatile>())),
+  Derived*>,
+  "dynamic_as should preserve cv qualification from the From type");
+
+static_assert(
+  std::is_same_v<decltype(scorpio_utils::dynamic_as<Derived>(std::declval<const Base* volatile>())),
+  const Derived*>,
+  "dynamic_as should preserve cv qualification from the From type");
+
+static_assert(
+  std::is_same_v<decltype(scorpio_utils::dynamic_as<Derived>(std::declval<volatile Base*>())),
+  volatile Derived*>,
+  "dynamic_as should preserve cv qualification from the From type");
+
+static_assert(
+  std::is_same_v<decltype(scorpio_utils::dynamic_as<Derived>(std::declval<const volatile Base*>())),
+  const volatile Derived*>,
+  "dynamic_as should preserve cv qualification from the From type");
+
 
 TEST(DynamicAs, unique_ptr_success) {
   std::unique_ptr<Base> base_ptr = std::make_unique<Derived>();
@@ -76,4 +138,18 @@ TEST(DynamicAs, raw_ptr_failed) {
   EXPECT_THROW(scorpio_utils::dynamic_as<Derived>(std::move(base_ptr)),
     FailedAssertionException) <<
     "dynamic_as should throw an exception when casting Base* to Derived*";
+}
+
+TEST(DynamicAs, null_ptr) {
+  std::unique_ptr<Base> null_unique_ptr;
+  auto result_unique_ptr = scorpio_utils::dynamic_as<Derived>(std::move(null_unique_ptr));
+  EXPECT_EQ(result_unique_ptr, nullptr) << "dynamic_as should return nullptr when casting a null unique_ptr";
+
+  std::shared_ptr<Base> null_shared_ptr;
+  auto result_shared_ptr = scorpio_utils::dynamic_as<Derived>(null_shared_ptr);
+  EXPECT_EQ(result_shared_ptr, nullptr) << "dynamic_as should return nullptr when casting a null shared_ptr";
+
+  Base* null_raw_ptr = nullptr;
+  auto result_raw_ptr = scorpio_utils::dynamic_as<Derived>(std::move(null_raw_ptr));
+  EXPECT_EQ(result_raw_ptr, nullptr) << "dynamic_as should return nullptr when casting a null raw pointer";
 }
