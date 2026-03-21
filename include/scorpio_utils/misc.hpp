@@ -29,7 +29,8 @@
 
 namespace scorpio_utils {
 template<typename T>
-SCU_ALWAYS_INLINE SCU_CONST_FUNC T clone(T v) {
+SCU_ALWAYS_INLINE auto clone(const T& v) {
+  static_assert(std::is_copy_constructible_v<T>, "clone requires copy constructible types");
   return v;
 }
 
@@ -63,6 +64,9 @@ VisitorOverloadingHelper(T ...)->VisitorOverloadingHelper<T...>;
  * \note When using with std::unique_ptr, the input pointer must be passed by value to ensure the ownership transfer.
  *       The function will release the ownership of the input pointer and return a new std::unique_ptr with the casted pointer.
  *
+ * \warning unique_ptr with custom deleters is not supported by this function,
+ *          since it cannot guarantee the correct behavior of the deleter after the cast.
+ *
  * \tparam To The type to cast to.
  * \tparam From The type to cast from.
  *
@@ -73,7 +77,7 @@ VisitorOverloadingHelper(T ...)->VisitorOverloadingHelper<T...>;
 template<typename To, typename From>
 SCU_ALWAYS_INLINE auto dynamic_as(From&& from) {
   static_assert(!std::is_reference_v<To>, "dynamic_as does not support reference types");
-  static_assert(!std::is_const_v<To>|| std::is_volatile_v<To>, "dynamic_as takes cv qualification from the From type");
+  static_assert(!std::is_const_v<To>&& !std::is_volatile_v<To>, "dynamic_as takes cv qualification from the From type");
   using DecayedFrom = std::decay_t<From>;
   #define SCU_DYNAMIC_AS_TARGET_TYPE(SourceType) \
   std::conditional_t< \
@@ -97,6 +101,11 @@ SCU_ALWAYS_INLINE auto dynamic_as(From&& from) {
                   "dynamic_as requires to pass unique_ptr by value to ensure the ownership transfer");
     static_assert(!std::is_const_v<From>,
                   "dynamic_as does not support const unique_ptr since it cannot transfer ownership");
+    // This static_assert is commented out because it needs C++23 to work :)
+    // or at least g++13 since this feature is for previous standards as well
+    // static_assert(std::is_same_v<IsUniquePtr<DecayedFrom>::DeleterType,
+    // std::default_delete<typename IsUniquePtr<DecayedFrom>::ElementType>>,
+    // "dynamic_as only supports unique_ptr with default deleter");
     using TargetType = SCU_DYNAMIC_AS_TARGET_TYPE(typename IsUniquePtr<DecayedFrom>::ElementType);
     if (from.get() == nullptr) {
       return std::unique_ptr<TargetType>(nullptr);
@@ -132,7 +141,7 @@ SCU_ALWAYS_INLINE auto dynamic_as(From&& from) {
     static_assert(
       is_unique_ptr_v<DecayedFrom>||
       is_shared_ptr_v<DecayedFrom>||
-      std::is_pointer_v<DecayedFrom>||
+      std::is_pointer_v<DecayedFrom>,
       "dynamic_as can only be used for pointer (raw or shared) types");
   }
   #undef SCU_DYNAMIC_AS_TARGET_TYPE

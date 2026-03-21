@@ -194,6 +194,7 @@ struct IsUniquePtr : std::false_type {
 template<typename T, typename Deleter>
 struct IsUniquePtr<std::unique_ptr<T, Deleter>>: std::true_type {
   using ElementType = T;
+  using DeleterType = Deleter;
   constexpr static bool is_polymorphic = std::is_polymorphic_v<std::decay_t<T>>;
 };
 
