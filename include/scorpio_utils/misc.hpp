@@ -29,7 +29,7 @@
 
 namespace scorpio_utils {
 template<typename T>
-SCU_ALWAYS_INLINE auto clone(const T& v) {
+SCU_ALWAYS_INLINE auto clone(const T& v) noexcept(std::is_nothrow_copy_constructible_v<T>) {
   static_assert(std::is_copy_constructible_v<T>, "clone requires copy constructible types");
   return v;
 }
@@ -115,7 +115,7 @@ SCU_ALWAYS_INLINE auto dynamic_as(From&& from) {
       if constexpr (is_default_deleter) {
         return SCU_DYNAMIC_AS_RETURN_TYPE(nullptr);
       } else {
-        return SCU_DYNAMIC_AS_RETURN_TYPE(nullptr, from.get_deleter());
+        return SCU_DYNAMIC_AS_RETURN_TYPE(nullptr, std::move(from.get_deleter()));
       }
     }
     auto result = dynamic_cast<std::add_pointer_t<TargetType>>(from.get());
@@ -127,7 +127,7 @@ SCU_ALWAYS_INLINE auto dynamic_as(From&& from) {
     if constexpr (is_default_deleter) {
       return SCU_DYNAMIC_AS_RETURN_TYPE(result);
     } else {
-      return SCU_DYNAMIC_AS_RETURN_TYPE(result, from.get_deleter());
+      return SCU_DYNAMIC_AS_RETURN_TYPE(result, std::move(from.get_deleter()));
     }
     #undef SCU_DYNAMIC_AS_RETURN_TYPE
   } else if constexpr (is_shared_ptr_v<DecayedFrom>) {
