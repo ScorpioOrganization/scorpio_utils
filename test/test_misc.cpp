@@ -31,6 +31,7 @@ public:
   throw FailedAssertionException(); \
 } while (0)
 
+#include "scorpio_utils/decorators.hpp"
 #include "scorpio_utils/defer.hpp"
 #include "scorpio_utils/misc.hpp"
 
@@ -110,6 +111,44 @@ TEST(DynamicAs, unique_ptr_failed) {
   EXPECT_THROW(scorpio_utils::dynamic_as<Derived>(std::move(base_ptr)),
     FailedAssertionException) <<
     "dynamic_as should throw an exception when casting unique_ptr<Base> to unique_ptr<Derived>";
+}
+
+TEST(DynamicAs, unique_ptr_custom_deleter_success) {
+  Base* raw_ptr = new Derived;
+  SCU_DEFER([raw_ptr] { delete raw_ptr; });
+  size_t custom_deleter_called = 0;
+  auto custom_deleter = [&custom_deleter_called](Base* p) { custom_deleter_called += SCU_AS(size_t, p != nullptr); };
+  std::unique_ptr<Base, decltype(custom_deleter)> base_ptr(raw_ptr, custom_deleter);
+  auto derived_ptr = scorpio_utils::dynamic_as<Derived>(std::move(base_ptr));
+  EXPECT_NE(derived_ptr,
+    nullptr) <<
+    "dynamic_as should successfully cast unique_ptr<Base, CustomDeleter> to unique_ptr<Derived, CustomDeleter>";
+  static_assert(std::is_same_v<std::decay_t<decltype(custom_deleter)>,
+    std::decay_t<decltype(derived_ptr.get_deleter())>>,
+    "dynamic_as should preserve the custom deleter type when casting unique_ptr");
+  EXPECT_EQ(custom_deleter_called, 0) << "custom deleter should not be called when the cast is successful";
+  base_ptr.reset();
+  EXPECT_EQ(custom_deleter_called, 0) << "custom deleter should not be called when the cast is successful";
+  derived_ptr.reset();
+  EXPECT_EQ(custom_deleter_called, 1) << "custom deleter should be called when the unique_ptr is reset";
+}
+
+TEST(DynamicAs, unique_ptr_custom_deleter_failed) {
+  Base* raw_ptr = new Derived2;
+  SCU_DEFER([raw_ptr] { delete raw_ptr; });
+  size_t custom_deleter_called = 0;
+  auto custom_deleter = [&custom_deleter_called](Base* p) { custom_deleter_called += SCU_AS(size_t, p != nullptr); };
+  {
+    // Scope is needed here because of shenanigans with inlining
+    std::unique_ptr<Base, decltype(custom_deleter)> base_ptr(raw_ptr, custom_deleter);
+
+    EXPECT_THROW(scorpio_utils::dynamic_as<Derived>(std::move(base_ptr)),
+      FailedAssertionException) <<
+      "dynamic_as should throw an exception when casting unique_ptr<Base, "
+      "CustomDeleter> to unique_ptr<Derived, CustomDeleter>";
+  }
+  EXPECT_EQ(custom_deleter_called, 1) <<
+    "custom deleter should be called when the cast fails and the unique_ptr is destroyed";
 }
 
 TEST(DynamicAs, shared_ptr_success) {

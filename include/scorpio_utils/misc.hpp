@@ -63,9 +63,8 @@ VisitorOverloadingHelper(T ...)->VisitorOverloadingHelper<T...>;
  * \note When `from == nullptr`, the function will return `nullptr` without performing any cast or assertion.
  * \note When using with std::unique_ptr, the input pointer must be passed by value to ensure the ownership transfer.
  *       The function will release the ownership of the input pointer and return a new std::unique_ptr with the casted pointer.
- *
- * \warning unique_ptr with custom deleters is not supported by this function,
- *          since it cannot guarantee the correct behavior of the deleter after the cast.
+ * \note When using with std::unique_ptr with a custom deleter,
+ *       the function will preserve the custom deleter in the returned std::unique_ptr.
  *
  * \tparam To The type to cast to.
  * \tparam From The type to cast from.
@@ -101,20 +100,36 @@ SCU_ALWAYS_INLINE auto dynamic_as(From&& from) {
                   "dynamic_as requires to pass unique_ptr by value to ensure the ownership transfer");
     static_assert(!std::is_const_v<From>,
                   "dynamic_as does not support const unique_ptr since it cannot transfer ownership");
-    // This static_assert is commented out because it needs C++23 to work :)
-    // or at least g++13 since this feature is for previous standards as well
-    // static_assert(std::is_same_v<IsUniquePtr<DecayedFrom>::DeleterType,
-    // std::default_delete<typename IsUniquePtr<DecayedFrom>::ElementType>>,
-    // "dynamic_as only supports unique_ptr with default deleter");
     using TargetType = SCU_DYNAMIC_AS_TARGET_TYPE(typename IsUniquePtr<DecayedFrom>::ElementType);
+    constexpr bool is_default_deleter = std::is_same_v<
+      std::default_delete<typename IsUniquePtr<DecayedFrom>::ElementType>,
+      typename IsUniquePtr<DecayedFrom>::DeleterType
+    >;
+    // Define is used here instead of `using ReturnType = ...;`to prevent lsp from displaying
+    // it as a ReturnType in the function signature, which is not informative at all
+    #define SCU_DYNAMIC_AS_RETURN_TYPE std::conditional_t< \
+    is_default_deleter, \
+    std::unique_ptr<TargetType>, \
+    std::unique_ptr<TargetType, typename IsUniquePtr<DecayedFrom>::DeleterType>>
     if (from.get() == nullptr) {
-      return std::unique_ptr<TargetType>(nullptr);
+      if constexpr (is_default_deleter) {
+        return SCU_DYNAMIC_AS_RETURN_TYPE(nullptr);
+      } else {
+        return SCU_DYNAMIC_AS_RETURN_TYPE(nullptr, from.get_deleter());
+      }
     }
     auto result = dynamic_cast<std::add_pointer_t<TargetType>>(from.get());
     SCU_ASSERT(result != nullptr,
         "dynamic_as failed to cast from " << typeid(From).name() << " to " << typeid(To).name());
-    from.release();
-    return std::unique_ptr<TargetType>(result);
+    if (SCU_LIKELY(result != nullptr)) {
+      from.release();
+    }
+    if constexpr (is_default_deleter) {
+      return SCU_DYNAMIC_AS_RETURN_TYPE(result);
+    } else {
+      return SCU_DYNAMIC_AS_RETURN_TYPE(result, from.get_deleter());
+    }
+    #undef SCU_DYNAMIC_AS_RETURN_TYPE
   } else if constexpr (is_shared_ptr_v<DecayedFrom>) {
     static_assert(IsSharedPtr<DecayedFrom>::is_polymorphic,
                   "dynamic_as requires polymorphic types when used with shared_ptr");
@@ -142,7 +157,7 @@ SCU_ALWAYS_INLINE auto dynamic_as(From&& from) {
       is_unique_ptr_v<DecayedFrom>||
       is_shared_ptr_v<DecayedFrom>||
       std::is_pointer_v<DecayedFrom>,
-      "dynamic_as can only be used for pointer (raw or shared) types");
+      "dynamic_as can only be used with pointers std::unique_ptr, std::shared_ptr, or raw pointers");
   }
   #undef SCU_DYNAMIC_AS_TARGET_TYPE
 }
