@@ -107,6 +107,7 @@ if(BUILD_TESTING)
     test_defer.cpp
     test_endianness.cpp
     test_expected.cpp
+    test_misc.cpp
     test_optional_utils.cpp
     test_sat_math.cpp
     test_stack_shared_ptr.cpp
