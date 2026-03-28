@@ -43,12 +43,12 @@
 #include "scorpio_utils/testing/mock_time_provider.hpp"
 #endif
 
-#define MAX_PACKET_SIZE (512)
-#define QOS_DEPTH_SAFETY_BUFFER (2048)
-#define UNRELIABLE_DATA_EXPIRY_NS (500'000'000)  // 500 milliseconds
+#define SCU_UDP_MAX_PACKET_SIZE (512)
+#define SCU_UDP_QOS_DEPTH_SAFETY_BUFFER (2048)
+#define SCU_UDP_UNRELIABLE_DATA_EXPIRY_NS (500'000'000)  // 500 milliseconds
 #define SCU_UDP_DEBUG_LOG_ENABLED (0)
-#define HEARTBEAT_PERIOD (50'000'000)
-#define TIMEOUT (5'000'000'000)
+#define SCU_UDP_HEARTBEAT_PERIOD (50'000'000)
+#define SCU_UDP_TIMEOUT (5'000'000'000)
 
 namespace scorpio_utils::network {
 struct UdpData {

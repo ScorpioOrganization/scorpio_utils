@@ -86,9 +86,9 @@ TEST(ScorpioUdpGmock, Listen) {
   EXPECT_TRUE(scorpio_udp->start()); \
   auto result = scorpio_udp->listen(ip, port);
   EXPECT_TRUE(result.is_ok()) << "Failed to listen: " << result.err_value();
-  EXPECT_EQ(time_provider->get_time_offset(), HEARTBEAT_PERIOD / 2);
+  EXPECT_EQ(time_provider->get_time_offset(), SCU_UDP_HEARTBEAT_PERIOD / 2);
 
-  time_provider->advance_time(TIMEOUT);
+  time_provider->advance_time(SCU_UDP_TIMEOUT);
 
   CLOSE_SCORPIO_UDP;
 }

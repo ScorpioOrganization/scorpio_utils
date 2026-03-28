@@ -22,7 +22,7 @@
 #include "scorpio_utils/ros/ros_variable.hpp"
 #include "scorpio_utils/testing/ros/subscribe_some.hpp"
 
-#define TIMEOUT std::chrono::milliseconds(100)
+#define SCU_UDP_TIMEOUT std::chrono::milliseconds(100)
 
 class RosVariableTest : public ::testing::Test {
 protected:
@@ -48,7 +48,7 @@ TEST_F(RosVariableTest, basicUsage) {
 
   {
     auto result = scorpio_utils::testing::ros::subscribe_some<std_msgs::msg::Bool>(
-        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, TIMEOUT);
+        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, SCU_UDP_TIMEOUT);
 
     EXPECT_EQ(result.size(), 1) << "Should receive one message initially";
     ASSERT_GT(result.size(), 0);
@@ -67,7 +67,7 @@ TEST_F(RosVariableTest, basicUsage) {
 
   {
     auto result = scorpio_utils::testing::ros::subscribe_some<std_msgs::msg::Bool>(
-        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, TIMEOUT);
+        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, SCU_UDP_TIMEOUT);
 
     EXPECT_EQ(result.size(), 1) << "Should receive one message initially";
     ASSERT_GT(result.size(), 0);
@@ -88,7 +88,7 @@ TEST_F(RosVariableTest, edit) {
 
   {
     auto result = scorpio_utils::testing::ros::subscribe_some<std_msgs::msg::Bool>(
-        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, TIMEOUT);
+        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, SCU_UDP_TIMEOUT);
 
     EXPECT_EQ(result.size(), 1) << "Should receive one message initially";
     ASSERT_GT(result.size(), 0);
@@ -100,7 +100,7 @@ TEST_F(RosVariableTest, edit) {
     editor->data = false;
     {
       auto result = scorpio_utils::testing::ros::subscribe_some<std_msgs::msg::Bool>(
-        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, TIMEOUT);
+        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, SCU_UDP_TIMEOUT);
 
       EXPECT_EQ(result.size(), 1) << "Should receive one message initially";
       ASSERT_GT(result.size(), 0);
@@ -109,7 +109,7 @@ TEST_F(RosVariableTest, edit) {
   }
 
   auto result = scorpio_utils::testing::ros::subscribe_some<std_msgs::msg::Bool>(
-      _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, TIMEOUT);
+      _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, SCU_UDP_TIMEOUT);
 
   EXPECT_EQ(result.size(), 1) << "Should receive one message initially";
   ASSERT_GT(result.size(), 0);
@@ -154,7 +154,7 @@ TEST_F(RosVariableTest, timer) {
 
   {
     auto result = scorpio_utils::testing::ros::subscribe_some<std_msgs::msg::Bool>(
-        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, TIMEOUT);
+        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, SCU_UDP_TIMEOUT);
 
     EXPECT_EQ(result.size(), 1) << "Should receive one message initially";
     ASSERT_GT(result.size(), 0);
@@ -170,7 +170,7 @@ TEST_F(RosVariableTest, write) {
 
   {
     auto result = scorpio_utils::testing::ros::subscribe_some<std_msgs::msg::Bool>(
-        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, TIMEOUT);
+        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, SCU_UDP_TIMEOUT);
 
     EXPECT_EQ(result.size(), 1) << "Should receive one message initially";
     ASSERT_GT(result.size(), 0);
@@ -187,7 +187,7 @@ TEST_F(RosVariableTest, write) {
 
   {
     auto result = scorpio_utils::testing::ros::subscribe_some<std_msgs::msg::Bool>(
-        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, TIMEOUT);
+        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, SCU_UDP_TIMEOUT);
 
     EXPECT_EQ(result.size(), 1) << "Should receive one message initially";
     ASSERT_GT(result.size(), 0);
@@ -201,7 +201,7 @@ TEST_F(RosVariableTest, write) {
   rclcpp::spin_some(_node);
   {
     auto result = scorpio_utils::testing::ros::subscribe_some<std_msgs::msg::Bool>(
-        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, TIMEOUT);
+        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, SCU_UDP_TIMEOUT);
 
     EXPECT_EQ(result.size(), 1) << "Should receive one message initially";
     ASSERT_GT(result.size(), 0);
@@ -218,7 +218,7 @@ TEST_F(RosVariableTest, write) {
   rclcpp::spin_some(_node);
   {
     auto result = scorpio_utils::testing::ros::subscribe_some<std_msgs::msg::Bool>(
-        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, TIMEOUT);
+        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, SCU_UDP_TIMEOUT);
 
     EXPECT_EQ(result.size(), 1) << "Should receive one message initially";
     ASSERT_GT(result.size(), 0);
@@ -231,7 +231,7 @@ TEST_F(RosVariableTest, write) {
 
   {
     auto result = scorpio_utils::testing::ros::subscribe_some<std_msgs::msg::Bool>(
-        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, TIMEOUT);
+        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, SCU_UDP_TIMEOUT);
 
     EXPECT_EQ(result.size(), 1) << "Should receive one message initially";
     ASSERT_GT(result.size(), 0);
@@ -259,7 +259,7 @@ TEST_F(RosVariableTest, callback) {
 
   {
     auto result = scorpio_utils::testing::ros::subscribe_some<std_msgs::msg::Bool>(
-        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, TIMEOUT);
+        _node, "/test_topic/get", rclcpp::QoS(10).reliable().transient_local(), 2, SCU_UDP_TIMEOUT);
 
     EXPECT_EQ(result.size(), 1) << "Should receive one message initially";
     ASSERT_GT(result.size(), 0);

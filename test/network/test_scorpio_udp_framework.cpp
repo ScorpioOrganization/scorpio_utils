@@ -41,7 +41,7 @@ using scorpio_utils::testing::MockTimeProvider;
 std::shared_ptr<scorpio_utils::testing::MockTimeProvider> get_time_provider();
 
 #define AS_BYTE(x) (SCU_AS(uint8_t, x))
-#define TICK_TIME (HEARTBEAT_PERIOD / 2)
+#define TICK_TIME (SCU_UDP_HEARTBEAT_PERIOD / 2)
 #define WHERE (__FILE__ ":" + std::to_string(__LINE__))
 
 auto generate_single_packet(
@@ -53,7 +53,7 @@ auto generate_single_packet(
   SCU_ASSERT(result.has_value(), "Failed to generate single packet message");
   SCU_ASSERT(result->first == sequence_number,
              "Sequence number of generated packet does not match the provided sequence number");
-  SCU_ASSERT(result->second.size() <= MAX_PACKET_SIZE,
+  SCU_ASSERT(result->second.size() <= SCU_UDP_MAX_PACKET_SIZE,
              "Generated packet is too large: " << result->second.size() << " bytes");
   SCU_ASSERT(result->second[0].size() != 0, "Generated packet is empty");
   return std::move(result->second.front());
@@ -542,11 +542,11 @@ protected:
   }
 
   void TearDown() override {
-    _time_provider->advance_time(TIMEOUT * 1000000000);
+    _time_provider->advance_time(SCU_UDP_TIMEOUT * 1000000000);
     stabilize_delay();
     _socket->close_channels();
     _connection.reset();
-    _time_provider->advance_time(TIMEOUT * 1000000000);
+    _time_provider->advance_time(SCU_UDP_TIMEOUT * 1000000000);
     stabilize_delay();
     _socket.reset();
     _time_provider.reset();

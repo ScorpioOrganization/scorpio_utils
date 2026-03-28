@@ -48,9 +48,9 @@ struct PanicException : public std::exception { };
 
 SCU_HOT SCU_CONST_FUNC constexpr size_t packets_count(size_t data_size, size_t header_without_frames_left) {
   size_t packets = SCU_AS(size_t, data_size != 0);
-  if (data_size > (MAX_PACKET_SIZE - header_without_frames_left)) {
-    data_size -= (MAX_PACKET_SIZE - header_without_frames_left);
-    auto packet_size = (MAX_PACKET_SIZE - header_without_frames_left - sizeof(FramesLeft));
+  if (data_size > (SCU_UDP_MAX_PACKET_SIZE - header_without_frames_left)) {
+    data_size -= (SCU_UDP_MAX_PACKET_SIZE - header_without_frames_left);
+    auto packet_size = (SCU_UDP_MAX_PACKET_SIZE - header_without_frames_left - sizeof(FramesLeft));
     packets += data_size / packet_size;
     packets += SCU_AS(size_t, (data_size % packet_size) != 0);
   }
@@ -157,7 +157,7 @@ ScorpioUdp::ScorpioUdp(
 )
 : _time_provider([] {
       auto result = get_time_provider();
-      result->set_time_offset(HEARTBEAT_PERIOD / 2);
+      result->set_time_offset(SCU_UDP_HEARTBEAT_PERIOD / 2);
       return result;
     }()),
   _new_connections(nullptr),
@@ -277,7 +277,7 @@ SCU_NORETURN SCU_COLD void ScorpioUdp::panic(std::string&& message) {
 void ScorpioUdp::receiver_thread() {
   try {
     while (SCU_LIKELY(!_stop.load(std::memory_order_relaxed))) {
-      std::vector<uint8_t> data(MAX_PACKET_SIZE);
+      std::vector<uint8_t> data(SCU_UDP_MAX_PACKET_SIZE);
       auto result = _socket.receive(data.data(), data.size());
       if (SCU_UNLIKELY(result.is_err())) {
         panic("Failed to receive data: " + std::move(result).err_value());
@@ -301,9 +301,9 @@ void ScorpioUdp::sender_thread() {
   try {
     while (SCU_LIKELY(!_stop.load(std::memory_order_relaxed))) {
       auto msg = _sender_channel.receive<true>();
-      SCU_ASSERT(msg.data.size() <= MAX_PACKET_SIZE,
+      SCU_ASSERT(msg.data.size() <= SCU_UDP_MAX_PACKET_SIZE,
         "UDP message size is too large (" << msg.data.size()
-                                          << " bytes), max is " << MAX_PACKET_SIZE << " bytes");
+                                          << " bytes), max is " << SCU_UDP_MAX_PACKET_SIZE << " bytes");
       if (SCU_UNLIKELY(!_socket.is_open())) {
         panic("Socket is not open");
       }
@@ -608,10 +608,10 @@ SCU_HOT std::optional<std::pair<size_t, std::vector<std::vector<uint8_t>>>> gene
           "Failed to convert sequence number to network format");
       }
     };
-  const auto packet_size_without_frames_left = MAX_PACKET_SIZE - header_without_frames_left_size;
+  const auto packet_size_without_frames_left = SCU_UDP_MAX_PACKET_SIZE - header_without_frames_left_size;
   const auto packet_size_with_frames_left = packet_size_without_frames_left - sizeof(FramesLeft);
   while (data.size() - current > packet_size_without_frames_left) {
-    packets.back().resize(MAX_PACKET_SIZE);
+    packets.back().resize(SCU_UDP_MAX_PACKET_SIZE);
     generate_header();
     size_t frames_left = (data.size() - current - packet_size_without_frames_left) / packet_size_with_frames_left;
     if (!host_to_network(static_cast<decltype(MessageHeader::frames_left)::value_type>(frames_left), packets.back(),
@@ -1039,7 +1039,7 @@ void ScorpioUdpConnection::process_packets(
 void ScorpioUdpConnection::send_heartbeat() {
   const auto time_since_last_packet = _time_provider->get_time() -
     _last_received_packet_time.load(std::memory_order_relaxed);
-  if (SCU_UNLIKELY(time_since_last_packet > TIMEOUT)) {
+  if (SCU_UNLIKELY(time_since_last_packet > SCU_UDP_TIMEOUT)) {
     panic("No packets received for 5 seconds");
   }
   // *  - While giving streams some CPU time look only for active streams (not iterate while 65536 streams)
@@ -1051,7 +1051,7 @@ void ScorpioUdpConnection::send_heartbeat() {
   std::vector<uint8_t> heartbeat_data;
   const auto first_stream = _next_stream_to_heartbeat;
   std::shared_ptr<ScorpioUdpStream> first_handled;
-  constexpr size_t packet_size = MAX_PACKET_SIZE - calculate_header_without_frames_left_size(Code::HEARTBEAT);
+  constexpr size_t packet_size = SCU_UDP_MAX_PACKET_SIZE - calculate_header_without_frames_left_size(Code::HEARTBEAT);
   heartbeat_data.reserve(packet_size);
   do {
     if (auto stream = _streams[_next_stream_to_heartbeat++].lock()) {
@@ -1076,16 +1076,16 @@ void ScorpioUdpConnection::processing_thread() {
     while (SCU_LIKELY((self = self_weak.lock()) && !_stop.load(std::memory_order_relaxed)) &&
       _state.load(std::memory_order_relaxed) == State::NEW) {
       SCU_DEFER([&self] { self.reset(); });
-      std::this_thread::sleep_for(std::chrono::nanoseconds(HEARTBEAT_PERIOD / 4));
+      std::this_thread::sleep_for(std::chrono::nanoseconds(SCU_UDP_HEARTBEAT_PERIOD / 4));
     }
-    std::this_thread::sleep_for(std::chrono::nanoseconds(HEARTBEAT_PERIOD));
+    std::this_thread::sleep_for(std::chrono::nanoseconds(SCU_UDP_HEARTBEAT_PERIOD));
     while (SCU_LIKELY((self = self_weak.lock()) && !_stop.load(std::memory_order_relaxed)) &&
       _state.load(std::memory_order_relaxed) == State::CONNECTING) {
       SCU_DEFER([&self] { self.reset(); });
       send_or_panic(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) });
-      std::this_thread::sleep_for(std::chrono::nanoseconds(HEARTBEAT_PERIOD));
+      std::this_thread::sleep_for(std::chrono::nanoseconds(SCU_UDP_HEARTBEAT_PERIOD));
     }
-    threading::EagerSelectTimeout timeout(HEARTBEAT_PERIOD, _time_provider);
+    threading::EagerSelectTimeout timeout(SCU_UDP_HEARTBEAT_PERIOD, _time_provider);
     timeout.start();
     while (SCU_LIKELY((self = self_weak.lock()) && !_stop.load(std::memory_order_relaxed))) {
       SCU_DEFER([&self] { self.reset(); });
@@ -1226,7 +1226,7 @@ ScorpioUdpStream::ScorpioUdpStream(
   std::shared_ptr<ScorpioUdpConnection> parent)
 : _stream_number(stream_number),
   _stream_qos(stream_qos),
-  _sent_history(stream_qos.is_reliable() ? stream_qos.depth_value() + QOS_DEPTH_SAFETY_BUFFER : 0),
+  _sent_history(stream_qos.is_reliable() ? stream_qos.depth_value() + SCU_UDP_QOS_DEPTH_SAFETY_BUFFER : 0),
   _parent(parent),
   _sequence_number(0),
   _least_non_delivered_seq_number(0),
@@ -1407,7 +1407,7 @@ void ScorpioUdpStream::remove_expired_unreliable_data() {
   std::vector<size_t> to_remove;
   to_remove.reserve(partial_data.received_frames.size());
   for (const auto& [seq_number, data] : partial_data.received_frames) {
-    if (current_time - data.receive_time > UNRELIABLE_DATA_EXPIRY_NS) {
+    if (current_time - data.receive_time > SCU_UDP_UNRELIABLE_DATA_EXPIRY_NS) {
       to_remove.push_back(seq_number);
     }
   }
@@ -1520,7 +1520,7 @@ void ScorpioUdpStream::handle_data_packet(const MessageHeader& header, UdpData&&
         "Inconsistent state after complete unreliable packet received");
       std::vector<uint8_t> complete_data;
       auto iter = start;
-      complete_data.reserve(SCU_AS(size_t, MAX_PACKET_SIZE * (iter->second.header.frames_left.value() + 2)));
+      complete_data.reserve(SCU_AS(size_t, SCU_UDP_MAX_PACKET_SIZE * (iter->second.header.frames_left.value() + 2)));
       do {
         std::ignore = complete_data.insert(
             complete_data.end(),
@@ -1564,7 +1564,7 @@ size_t ScorpioUdpStream::get_packet_number(const SeqNumber v) noexcept {
 }
 
 bool ScorpioUdpStream::append_heartbeat_data(std::vector<uint8_t>& heartbeat_data) const {
-  constexpr size_t packet_size = MAX_PACKET_SIZE - calculate_header_without_frames_left_size(Code::HEARTBEAT);
+  constexpr size_t packet_size = SCU_UDP_MAX_PACKET_SIZE - calculate_header_without_frames_left_size(Code::HEARTBEAT);
   static_assert(packet_size >= sizeof(StreamNumber) + 1 + sizeof(SeqNumber),
     "Packet size is too small to fit any heartbeat data");
   constexpr size_t prefix_size = sizeof(StreamNumber) + 1;
