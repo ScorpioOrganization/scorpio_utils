@@ -205,26 +205,6 @@ bool ScorpioUdp::send(
   return true;
 }
 
-bool ScorpioUdp::send(
-  Ipv4 remote_ip,
-  Port remote_port,
-  std::vector<uint8_t>&& packet
-) {
-  if (SCU_UNLIKELY(!_socket.is_open())) {
-    return false;
-  }
-  try {
-    _sender_channel.send<true>({
-      /*._ip =   */ remote_ip,
-      /*._port = */ remote_port,
-      /*._data = */ std::move(packet),
-      });
-  } catch (const threading::ClosedChannelException&) {
-    return false;
-  }
-  return true;
-}
-
 bool ScorpioUdp::stop() {
   std::unique_lock lock(_threads_mutex, std::try_to_lock);
   if (!lock.owns_lock()) {
