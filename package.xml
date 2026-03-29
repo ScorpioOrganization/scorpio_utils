@@ -10,6 +10,8 @@
   <author email="xxx@gmail.com">Igor Zaworski</author>
 
   <depend>backward_ros</depend>
+  <depend>fmt</depend>
+  <depend>magic_enum</depend>
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
   
