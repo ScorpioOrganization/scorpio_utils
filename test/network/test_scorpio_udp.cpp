@@ -2,12 +2,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <fstream>
 #include <thread>
 #include <tuple>
 #include <unordered_set>
 #include <utility>
 
 #include "scorpio_utils/decorators.hpp"
+#include "scorpio_utils/logger/os_logger.hpp"
 #include "scorpio_utils/network/scorpio_udp.hpp"
 
 using scorpio_utils::network::Ipv4;
@@ -145,12 +147,18 @@ TEST(ScorpioUdp, SendDataOrder) {
 }
 
 TEST(ScorpioUdp, LargePacket) {
+  auto sender_logger = std::make_shared<scorpio_utils::logger::OSLogger<std::ofstream>>("sender_log.txt");
+  auto receiver_logger = std::make_shared<scorpio_utils::logger::OSLogger<std::ofstream>>("receiver_log.txt");
   const auto [client_connection, server_connection] = get_client_server_connection(PORT);
   ASSERT_TRUE(client_connection);
   ASSERT_TRUE(server_connection);
+  client_connection->get_socket()->set_logger(sender_logger);
+  server_connection->get_socket()->set_logger(receiver_logger);
+  client_connection->set_logger(sender_logger);
+  server_connection->set_logger(receiver_logger);
   server_connection->set_auto_accept_stream(true);
   client_connection->set_auto_accept_stream(true);
-  constexpr size_t NUM_PACKETS = 1000ul;
+  constexpr size_t NUM_PACKETS = 5000ul;
   constexpr size_t PACKET_SIZE = 5000ul;
   auto server_stream =
     server_connection->create_stream(1, { NUM_PACKETS* PACKET_SIZE / 500,

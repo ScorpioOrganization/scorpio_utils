@@ -16,7 +16,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "threading/thread_pool.hpp"
+#include "scorpio_utils/threading/thread_pool.hpp"
 
 void scorpio_utils::threading::ThreadPool::thread_worker() {
   std::optional<UniqueFunction<void()>> task;

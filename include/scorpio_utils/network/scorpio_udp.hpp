@@ -3,9 +3,6 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
-#if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
-#include <fstream>
-#endif
 #include <functional>
 #include <limits>
 #include <map>
@@ -21,9 +18,7 @@
 #include <variant>
 #include <vector>
 #include "scorpio_utils/expected.hpp"
-#if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
-#include "scorpio_utils/logger.hpp"
-#endif
+#include "scorpio_utils/logger/logger.hpp"
 #include "scorpio_utils/network/orderer.hpp"
 #include "scorpio_utils/network/udp.hpp"
 #include "scorpio_utils/threading/channel.hpp"
@@ -234,6 +229,7 @@ private:
   std::atomic<State> _state;
   std::atomic<size_t> _creation_tries;
   Orderer<std::pair<MessageHeader, std::vector<uint8_t>>> _orderer;
+  std::shared_ptr<logger::Logger> _logger;
   struct UnreliableData {
     int64_t receive_time;
     MessageHeader header;
@@ -248,10 +244,6 @@ private:
   SeqNumber _last_greatest_sequence_number;
   std::string _panic_message;
   std::mutex _panic_mutex;
-
-#if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
-  void log_to_file(std::string&& message);
-#endif
 
   size_t get_packet_number(SeqNumber seq) noexcept;
 
@@ -313,6 +305,15 @@ public:
     }
     return std::nullopt;
   }
+  SCU_ALWAYS_INLINE void set_logger(std::shared_ptr<logger::Logger> logger) noexcept {
+    _logger = std::move(logger);
+  }
+  SCU_ALWAYS_INLINE auto get_logger() const noexcept {
+    return _logger;
+  }
+  SCU_ALWAYS_INLINE auto get_connection() const noexcept {
+    return _parent;
+  }
 };
 
 class ScorpioUdpConnection : public std::enable_shared_from_this<ScorpioUdpConnection> {
@@ -343,10 +344,7 @@ private:
   std::atomic<int64_t> _last_received_packet_time;
   std::mutex _panic_mutex;
   threading::Signal _start_signal;
-
-#if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
-  void log_to_file(std::string&& message);
-#endif
+  std::shared_ptr<logger::Logger> _logger;
 
   bool connected();
 
@@ -439,6 +437,15 @@ public:
   SCU_ALWAYS_INLINE auto last_received_packet_time() const noexcept {
     return _last_received_packet_time.load(std::memory_order_relaxed);
   }
+  SCU_ALWAYS_INLINE void set_logger(std::shared_ptr<logger::Logger> logger) noexcept {
+    _logger = std::move(logger);
+  }
+  SCU_ALWAYS_INLINE auto get_logger() const noexcept {
+    return _logger;
+  }
+  SCU_ALWAYS_INLINE auto get_socket() const noexcept {
+    return _parent;
+  }
 };
 
 class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
@@ -459,11 +466,7 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   std::unordered_map<std::pair<Ipv4, Port>, std::weak_ptr<ScorpioUdpConnection>> _user_connections;
   std::mutex _panic_mutex;
   threading::Signal _start_signal;
-#if defined(SCORPIO_UTILS_SUDP_LOG_TO_FILE) && SCORPIO_UTILS_SUDP_LOG_TO_FILE == 1
-  scorpio_utils::Logger<std::ofstream> _logger;
-
-  void log_to_file(std::string&& message);
-#endif
+  std::shared_ptr<logger::Logger> _logger;
 
   std::string _panic_message;
   std::atomic<bool> _panic;
@@ -494,8 +497,9 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
 #endif
   ScorpioUdp(
 #ifdef SCU_UDP_MOCK
-    scorpio_utils::network::UdpSocket& socket
+    scorpio_utils::network::UdpSocket& socket,
 #endif
+    std::shared_ptr<logger::Logger> logger
   );
 
   void sender_thread();
@@ -523,8 +527,9 @@ public:
 
   [[nodiscard]] static std::shared_ptr<ScorpioUdp> create(
 #ifdef SCU_UDP_MOCK
-    scorpio_utils::network::UdpSocket& socket
+    scorpio_utils::network::UdpSocket& socket,
 #endif
+    std::shared_ptr<logger::Logger> logger = nullptr
   );
   ~ScorpioUdp();
 
@@ -566,6 +571,12 @@ public:
 
   SCU_ALWAYS_INLINE auto get_existing_connection(Ipv4 remote_ip, Port remote_port) {
     return _user_connections[{ remote_ip, remote_port }].lock();
+  }
+  SCU_ALWAYS_INLINE void set_logger(std::shared_ptr<logger::Logger> logger) noexcept {
+    _logger = std::move(logger);
+  }
+  SCU_ALWAYS_INLINE auto get_logger() const noexcept {
+    return _logger;
   }
 };
 }  // namespace scorpio_utils::network
