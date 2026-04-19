@@ -224,7 +224,7 @@ public:
     if (auto result = socket.get_from_send_queue()) {
       auto [ip, port, data] = *std::move(result);
       if (SCU_UNLIKELY(ip != _remote_ip)) {
-        return Unexpected("Expected remote IP "s + std::to_string(_remote_ip.ip()) + " but got " +
+        return Unexpected("Expected remote IP "s + _remote_ip.str() + " but got " +
           std::to_string(ip.ip()));
       }
       if (SCU_UNLIKELY(port != _remote_port)) {
@@ -238,7 +238,7 @@ public:
     return Unexpected("No packet was sent"s);
   }
   std::string name() override {
-    return "ExpectPacket(" + std::to_string(_remote_ip.ip()) + ":" + std::to_string(_remote_port) + ", " +
+    return "ExpectPacket(" + _remote_ip.str() + ":" + std::to_string(_remote_port) + ", " +
            std::to_string(_data.size()) + " bytes)";
   }
   ~ExpectPacket() override = default;
@@ -336,7 +336,7 @@ public:
       return Success();
     }
     std::string name() override {
-      return "CreateConnectionEvent(" + std::to_string(_remote_ip.ip()) + ":" + std::to_string(_remote_port) + ")";
+      return "CreateConnectionEvent(" + _remote_ip.str() + ":" + std::to_string(_remote_port) + ")";
     }
     ~CreateConnectionEvent() override = default;
   };
