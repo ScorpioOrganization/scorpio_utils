@@ -1,10 +1,10 @@
 #pragma once
 
+#include <fmt/core.h>
 #include <atomic>
 #include <string>
 #include <thread>
 #include <utility>
-#include <fmt/core.h>
 #include "scorpio_utils/logger/logger.hpp"
 #include "scorpio_utils/magic_enum_include.hpp"
 #include "scorpio_utils/threading/channel.hpp"
