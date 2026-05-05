@@ -465,7 +465,6 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   std::atomic<size_t> _mock_sequence_number;
   std::atomic<bool> _auto_accept;
   std::atomic<bool> _stop;
-  std::unordered_map<std::pair<Ipv4, Port>, std::weak_ptr<ScorpioUdpConnection>> _user_connections;
   std::mutex _panic_mutex;
   threading::Signal _start_signal;
   std::shared_ptr<logger::Logger> _logger;
@@ -571,9 +570,6 @@ public:
     return std::nullopt;
   }
 
-  SCU_ALWAYS_INLINE auto get_existing_connection(Ipv4 remote_ip, Port remote_port) {
-    return _user_connections[{ remote_ip, remote_port }].lock();
-  }
   SCU_ALWAYS_INLINE void set_logger(std::shared_ptr<logger::Logger> logger) noexcept {
     _logger = std::move(logger);
   }

@@ -670,7 +670,10 @@ bool ScorpioUdp::send(
     return false;
   }
   for (auto& packet : packets->second) {
-    send(remote_ip, remote_port, std::move(packet));
+    if (SCU_UNLIKELY(!send(remote_ip, remote_port, std::move(packet)))) {
+      SCU_LOG_ERROR(_logger, "Failed to send packet to {}:{}", remote_ip.str(), remote_port);
+      return false;
+    }
   }
   return true;
 }
@@ -711,6 +714,7 @@ ScorpioUdpConnection::ScorpioUdpConnection(Ipv4 remote_ip, Port remote_port, std
   _time_provider(_parent->_time_provider),
   _last_received_packet_time(_time_provider->get_time()),
   _logger(_parent->_logger),
+  _stream_exists{false},
   _next_stream_to_heartbeat(0),
   _processing_thread(&ScorpioUdpConnection::processing_thread, this) {
 }
@@ -1186,6 +1190,7 @@ bool ScorpioUdpConnection::close() {
   send(Code::DISCONNECT, { AS_BYTE(Code::DisconnectSubCommands::DISCONNECT) },
     std::nullopt, std::nullopt);
   _stop.store(true, std::memory_order_relaxed);
+  _state.store(State::CLOSED, std::memory_order_relaxed);
   _new_streams.close();
   _awaiting_streams.close();
   _incoming_packets.close();
@@ -1563,7 +1568,7 @@ size_t ScorpioUdpStream::get_packet_number(const SeqNumber v) noexcept {
   } else {
     complement = SCU_AS(size_t, _sequence_complement);
   }
-  return complement * SCU_AS(size_t, std::numeric_limits<SeqNumber>::max()) + SCU_AS(size_t, v);
+  return complement * (SCU_AS(size_t, std::numeric_limits<SeqNumber>::max()) + 1) + SCU_AS(size_t, v);
 }
 
 bool ScorpioUdpStream::append_heartbeat_data(std::vector<uint8_t>& heartbeat_data) const {

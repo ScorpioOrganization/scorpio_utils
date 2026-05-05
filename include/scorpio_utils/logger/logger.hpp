@@ -44,7 +44,7 @@ struct LoggerFormatter {
   }
 };
 template<typename ... Args>
-SCU_ALWAYS_INLINE std::string logger_formater_helper(std::string&& message, Args&&... args) {
+SCU_ALWAYS_INLINE std::string logger_formatter_helper(std::string&& message, Args&&... args) {
   return ::fmt::format(message, (LoggerFormatter<Args>::format(std::forward<Args>(args)))...);
 }
 }  // namespace scorpio_utils::logger
@@ -56,7 +56,7 @@ SCU_ALWAYS_INLINE std::string logger_formater_helper(std::string&& message, Args
 #define SCU_LOG(loggerPtr, level, ...) \
   do { \
     if (loggerPtr) { \
-      loggerPtr->log(level, ::scorpio_utils::logger::logger_formater_helper(__VA_ARGS__)); \
+      loggerPtr->log(level, ::scorpio_utils::logger::logger_formatter_helper(__VA_ARGS__)); \
     } \
   } while (0)
 
