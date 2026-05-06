@@ -239,7 +239,10 @@ bool ScorpioUdp::start() {
     return false;
   }
   SCU_LOG_INFO(_logger, "ScorpioUdp starting");
-  _socket.open();
+  if (SCU_UNLIKELY(!_socket.open())) {
+    panic("Failed to open socket");
+    return false;
+  }
   _new_connections = std::make_unique<decltype(_new_connections)::element_type>();
   _threads.emplace_back(&ScorpioUdp::receiver_thread, this);
   _threads.emplace_back(&ScorpioUdp::sender_thread, this);
@@ -1027,7 +1030,6 @@ void ScorpioUdpConnection::pull_awaiting_streams(std::shared_ptr<scorpio_utils::
     panic("Stream with the same stream number already exists");
   } else {
     SCU_DO_AND_ASSERT(stream->send_create_packet(), "First CREATE_STREAM packet send failed");
-    send_or_panic(Code::CREATE_STREAM, { }, "Failed to send CREATE_STREAM command");
     stream->_state.store(ScorpioUdpStream::State::CREATING, std::memory_order_relaxed);
     _streams[stream->_stream_number] = stream;
   }
