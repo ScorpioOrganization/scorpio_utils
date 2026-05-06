@@ -1606,7 +1606,8 @@ bool ScorpioUdpStream::append_heartbeat_data(std::vector<uint8_t>& heartbeat_dat
   SCU_DO_AND_ASSERT(host_to_network(SCU_AS(SeqNumber, contained[0].second), heartbeat_data, pos),
     "Failed to convert sequence number to network format");
 
-  for (size_t i = 1; i < contained_count; ++i) {
+  for (size_t i = 0; i < contained_count; ) {
+    ++i;
     const auto& [begin, end] = contained[i];
     SCU_LOG_TRACE(_logger, "Heartbeat stream {} ({}): contained range {} - {}", _stream_number, i, begin, end);
     SCU_DO_AND_ASSERT(host_to_network(SCU_AS(SeqNumber, begin), heartbeat_data, pos),
@@ -1653,7 +1654,7 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
     }
     const auto begin_transformed = least_significant_bytes_to_val(greatest_seen_val, begin);
     for (auto i = least_significant_bytes_to_val(greatest_seen_val, end); i < begin_transformed; ++i) {
-      if (i <= sequence_number - _stream_qos.depth_value()) {
+      if (i <= sat_sub(sequence_number, _stream_qos.depth_value())) {
         SCU_LOG_WARNING(_logger,
                         "Peer expects resend of packet with sequence number {} on stream {}, "
                         "but it's already out of resend history",
