@@ -510,6 +510,9 @@ SCU_HOT void ScorpioUdp::process_packet(UdpData udp_data) {
           connection_opt->_incoming_packets.send<true>({ header, std::move(udp_data) });
         } else {
           // Received connection-oriented packet for non-existing connection
+          SCU_LOG_ERROR(_logger,
+            "Received packet for non-existing connection from {}:{}. Command: {}",
+            udp_data.ip.str(), udp_data.port, SCU_AS(int, header.command));
           // SCU_UNIMPLEMENTED();  // This is harmless so, just ignore it for now
         }
       } break;
@@ -1296,6 +1299,10 @@ SCU_HOT bool ScorpioUdpStream::send(Code code, const std::vector<uint8_t>& data)
       data.size(), _stream_number);
     return false;
   }
+  std::unique_lock lock(_sent_history_mutex, std::defer_lock);
+  if (_stream_qos.is_reliable()) {
+    lock.lock();
+  }
   auto seq = packets->first;
   for (auto& packet : packets->second) {
     if (_stream_qos.is_reliable()) {
@@ -1428,9 +1435,7 @@ void ScorpioUdpStream::remove_expired_unreliable_data() {
 void ScorpioUdpStream::handle_data_packet(const MessageHeader& header, UdpData&& data) {
   if (_stream_qos.is_reliable()) {
     const auto seq_number = get_packet_number(header.seq_number.value());
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-    std::cerr << "Processing ordered packet: " << seq_number << "\n";
-#endif
+    SCU_LOG_TRACE(_logger, "Processing ordered packet on stream {}: seq {}", _stream_number, seq_number);
     switch (_orderer.add(seq_number, { header, std::move(data.data) })) {
       case OrdererAddResult::TOO_NEW:
         panic("Received packet is too new");
@@ -1595,7 +1600,8 @@ bool ScorpioUdpStream::append_heartbeat_data(std::vector<uint8_t>& heartbeat_dat
   heartbeat_data.resize(pos + required_size);
   SCU_DO_AND_ASSERT(host_to_network(_stream_number, heartbeat_data, pos),
     "Failed to convert stream number to network format");
-  const auto contained_count = (required_size - prefix_size) / (sizeof(SeqNumber) * 2);
+  const auto contained_count =
+    std::min(contained.size() - 1, (max_required_size - prefix_size - sizeof(SeqNumber)) / (2 * sizeof(SeqNumber)));
   heartbeat_data[pos++] = AS_BYTE(contained_count);
   SCU_DO_AND_ASSERT(host_to_network(SCU_AS(SeqNumber, contained[0].second), heartbeat_data, pos),
     "Failed to convert sequence number to network format");
@@ -1638,6 +1644,7 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
   _least_non_delivered_seq_number.store(greatest_seen_val, std::memory_order_relaxed);
   SeqNumber begin;
   std::atomic_thread_fence(std::memory_order_acquire);
+  std::lock_guard lock(_sent_history_mutex);
   auto sequence_number = _sequence_number.load(std::memory_order_relaxed);
   while (range_count--) {
     if (SCU_UNLIKELY(!network_to_host(data, &begin, pos))) {
