@@ -41,7 +41,7 @@ using scorpio_utils::testing::MockTimeProvider;
 std::shared_ptr<scorpio_utils::testing::MockTimeProvider> get_time_provider();
 
 #define AS_BYTE(x) (SCU_AS(uint8_t, x))
-#define TICK_TIME (HEARTBEAT_PERIOD / 2)
+#define TICK_TIME (HEARTBEAT_PERIOD)
 #define WHERE (__FILE__ ":" + std::to_string(__LINE__))
 
 auto generate_single_packet(

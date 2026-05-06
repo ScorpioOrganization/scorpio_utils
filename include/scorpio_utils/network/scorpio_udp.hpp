@@ -224,6 +224,7 @@ private:
   const StreamNumber _stream_number;
   const StreamQoS _stream_qos;
   const int64_t _creation_time;
+  std::mutex _sent_history_mutex;
   std::vector<std::optional<std::vector<uint8_t>>> _sent_history;
   std::shared_ptr<ScorpioUdpConnection> _parent;
   std::atomic<size_t> _sequence_number;
