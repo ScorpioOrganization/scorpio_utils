@@ -1239,13 +1239,13 @@ ScorpioUdpStream::ScorpioUdpStream(
 : _stream_number(stream_number),
   _stream_qos(stream_qos),
   _creation_time(parent->_time_provider->get_time()),
-  _sent_history(stream_qos.is_reliable() ? stream_qos.depth_value() + QOS_DEPTH_SAFETY_BUFFER : 0),
+  _sent_history(stream_qos.is_reliable() ? stream_qos.depth_value() + SCU_UDP_QOS_DEPTH_SAFETY_BUFFER : 0),
   _parent(std::move(parent)),
   _sequence_number(0),
   _least_non_delivered_seq_number(0),
   _state(State::NEW),
   _creation_tries(0),
-  _orderer(stream_qos.depth_value() + QOS_DEPTH_SAFETY_BUFFER),
+  _orderer(stream_qos.depth_value() + SCU_UDP_QOS_DEPTH_SAFETY_BUFFER),
   _logger(_parent->_logger),
   _partial_data(std::in_place_index_t<0>{ }),
   _sequence_complement(0),
@@ -1399,8 +1399,8 @@ bool ScorpioUdpStream::send_close_packet() {
 void ScorpioUdpStream::update() {
   switch (state()) {
     case State::CREATING: {
-        if (_parent->_time_provider->get_time() - _creation_time > CREATE_RETRY_PERIOD) {
-          SCU_LOG_ERROR(_logger, "Stream creation failed after {} ms, retrying...", CREATE_RETRY_PERIOD / 1'000'000);
+        if (_parent->_time_provider->get_time() - _creation_time > SCU_UDP_CREATE_RETRY_PERIOD) {
+          SCU_LOG_ERROR(_logger, "Stream creation failed after {} ms, retrying...", SCU_UDP_CREATE_RETRY_PERIOD / 1'000'000);
           close();
           break;
         }
