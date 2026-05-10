@@ -16,10 +16,10 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "threading/waitable.hpp"
+#include "scorpio_utils/threading/waitable.hpp"
 
 #include <algorithm>
-#include "threading/wait_group.hpp"
+#include "scorpio_utils/threading/wait_group.hpp"
 
 void scorpio_utils::threading::WaitableBase::wait_with(WaitGroup* const wait_group) {
   if (_done) {
