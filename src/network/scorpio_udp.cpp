@@ -1400,7 +1400,8 @@ void ScorpioUdpStream::update() {
   switch (state()) {
     case State::CREATING: {
         if (_parent->_time_provider->get_time() - _creation_time > SCU_UDP_CREATE_RETRY_PERIOD) {
-          SCU_LOG_ERROR(_logger, "Stream creation failed after {} ms, retrying...", SCU_UDP_CREATE_RETRY_PERIOD / 1'000'000);
+          SCU_LOG_ERROR(_logger, "Stream creation failed after {} ms, retrying...",
+                        SCU_UDP_CREATE_RETRY_PERIOD / 1'000'000);
           close();
           break;
         }
