@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.8)
 project(scorpio_utils)
 
+if(DOCKER_BUILD)
+  add_definitions(-DDOCKER_BUILD)
+endif()
+
 find_package(ament_cmake REQUIRED)
 find_package(backward_ros REQUIRED)
 find_package(rclcpp REQUIRED)
