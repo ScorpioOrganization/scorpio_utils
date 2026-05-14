@@ -14,7 +14,7 @@ Builds expect to live in a colcon workspace rooted at `/home/igor/ros2_ws` (one 
 
 ```bash
 # Build (from workspace root)
-colcon build --packages-select scorpio_utils --symlink-install
+colcon build --packages-select scorpio_utils
 
 # Run all tests
 colcon test --packages-select scorpio_utils --return-code-on-test-failure

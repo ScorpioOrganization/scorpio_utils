@@ -244,6 +244,54 @@ public:
   ~ExpectPacket() override = default;
 };
 
+class ExpectPacketTimeout final : public EventInTime {
+  const Ipv4 _remote_ip;
+  const Port _remote_port;
+  const std::vector<uint8_t> _data;
+  const int64_t _period;
+  const size_t _max_attempts;
+
+public:
+  ExpectPacketTimeout(Ipv4 remote_ip, Port remote_port, std::vector<uint8_t> data,
+                      int64_t period = TICK_TIME, size_t max_attempts = 20)
+  : _remote_ip(remote_ip), _remote_port(remote_port), _data(std::move(data)),
+    _period(period), _max_attempts(max_attempts) { }
+
+  Expected<Success, std::string> execute(
+    int64_t,
+    UdpSocket& socket,
+    std::shared_ptr<ScorpioUdp>
+  ) override {
+    const auto time_provider = get_time_provider();
+    for (size_t attempt = 0; attempt < _max_attempts; ++attempt) {
+      if (auto result = socket.get_from_send_queue<false>()) {
+        auto [ip, port, data] = *std::move(result);
+        if (SCU_UNLIKELY(ip != _remote_ip)) {
+          return Unexpected("Expected remote IP "s + _remote_ip.str() + " but got " +
+            std::to_string(ip.ip()));
+        }
+        if (SCU_UNLIKELY(port != _remote_port)) {
+          return Unexpected("Expected remote port " + std::to_string(_remote_port) + " but got " + std::to_string(port));
+        }
+        if (SCU_UNLIKELY(data != _data)) {
+          return Unexpected("Expected data " + packet_to_string(_data) + " but got " + packet_to_string(data));
+        }
+        return Success();
+      }
+      time_provider->advance_time(_period);
+      std::this_thread::sleep_for(std::chrono::nanoseconds(_period));
+    }
+    return Unexpected("No packet received after "s + std::to_string(_max_attempts) +
+      " attempts (period=" + std::to_string(_period) + "ns)");
+  }
+  std::string name() override {
+    return "ExpectPacketTimeout(" + _remote_ip.str() + ":" + std::to_string(_remote_port) + ", " +
+           std::to_string(_data.size()) + " bytes, period=" + std::to_string(_period) +
+           "ns, max_attempts=" + std::to_string(_max_attempts) + ")";
+  }
+  ~ExpectPacketTimeout() override = default;
+};
+
 class ConnectionHandle final : public std::enable_shared_from_this<ConnectionHandle> {
   friend class StreamHandle;
   std::optional<std::shared_ptr<ScorpioUdpConnection>> _connection;
@@ -581,7 +629,7 @@ auto create_connection(std::vector<EventQueueItem>& events) {
   std::shared_ptr<ConnectionHandle> connection_handle = ConnectionHandle::create();
   events.push_back({ WHERE, 0, std::make_unique<StartScorpioUdp>() });
   events.push_back({ WHERE, 0, connection_handle->create_connection(Ipv4(127, 0, 0, 1), 12345) });
-  events.push_back({ WHERE, TICK_TIME, std::make_unique<ExpectPacket>(Ipv4(127, 0, 0, 1), 12345,
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
   generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) })) });
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
   generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::ACCEPTED) })) });
@@ -592,8 +640,8 @@ auto create_connection(std::vector<EventQueueItem>& events) {
 void close_connection(std::vector<EventQueueItem>& events) {
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
   generate_single_packet(Code::DISCONNECT, { AS_BYTE(Code::DisconnectSubCommands::DISCONNECT) })) });
-  events.push_back({ WHERE, TICK_TIME,
-      std::make_unique<ExpectPacket>(Ipv4(127, 0, 0, 1), 12345,
+  events.push_back({ WHERE, 0,
+      std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
   generate_single_packet(Code::DISCONNECT, { AS_BYTE(Code::DisconnectSubCommands::ACCEPTED) })) });
 }
 
@@ -612,13 +660,12 @@ TEST_F(ScorpioUdpTester, accept_connection_and_close) {
   events.push_back({ WHERE, 0, std::make_unique<SetAutoAccept>(true) });
   events.push_back({ WHERE, TICK_TIME, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
   generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) })) });
-  events.push_back({ WHERE, TICK_TIME, std::make_unique<SleepEvent>(TICK_TIME) });
-  events.push_back({ WHERE, 0, std::make_unique<ExpectPacket>(Ipv4(127, 0, 0, 1), 12345,
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
   generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::ACCEPTED) })) });
   events.push_back({ WHERE, 0, connection_handle->get_connection(true) });
   events.push_back({ WHERE, 0, connection_handle->connection_is_alive(true) });
   events.push_back({ WHERE, 0, connection_handle->close_connection(true) });
-  events.push_back({ WHERE, 0, std::make_unique<ExpectPacket>(Ipv4(127, 0, 0, 1), 12345,
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
   generate_single_packet(Code::DISCONNECT, { AS_BYTE(Code::DisconnectSubCommands::DISCONNECT) })) });
   execute_test(events);
 }
@@ -631,8 +678,7 @@ TEST_F(ScorpioUdpTester, reject_connection) {
   events.push_back({ WHERE, 0, std::make_unique<SetAutoAccept>(false) });
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
   generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) })) });
-  events.push_back({ WHERE, TICK_TIME, std::make_unique<SleepEvent>(TICK_TIME) });
-  events.push_back({ WHERE, 0, std::make_unique<ExpectPacket>(Ipv4(127, 0, 0, 1), 12345,
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
   generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::REJECTED) })) });
   execute_test(events);
 }
