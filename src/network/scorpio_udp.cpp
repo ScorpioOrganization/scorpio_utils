@@ -1029,7 +1029,7 @@ void ScorpioUdpConnection::pull_awaiting_streams(std::shared_ptr<scorpio_utils::
   if (current && current->is_alive()) {
     panic("Stream with the same stream number already exists");
   } else {
-    SCU_DO_AND_ASSERT(stream->send_create_packet(), "First CREATE_STREAM packet send failed");
+    stream->send_create_packet();
     stream->_state.store(ScorpioUdpStream::State::CREATING, std::memory_order_relaxed);
     _streams[stream->_stream_number] = stream;
   }
@@ -1269,7 +1269,7 @@ ScorpioUdpStream::~ScorpioUdpStream() {
 
 bool ScorpioUdpStream::close() {
   State expected = state();
-  while (is_active()) {
+  while (state() <= State::CREATED) {
     if (_state.compare_exchange_strong(
         expected,
         State::CLOSING,
@@ -1346,11 +1346,7 @@ SCU_COLD void ScorpioUdpStream::panic(std::string&& message) {
   _state.store(State::ERROR, std::memory_order_release);
 }
 
-bool ScorpioUdpStream::send_create_packet() {
-  if (SCU_UNLIKELY(_creation_tries.fetch_add(1, std::memory_order_relaxed) > 10)) {
-    panic("Failed to create stream after 10 tries");
-    return false;
-  }
+void ScorpioUdpStream::send_create_packet() {
   std::vector<uint8_t> packet;
   constexpr auto minimal_size = sizeof(Code::CreateStreamSubCommands) + sizeof(StreamNumber) +
     sizeof(StreamQoS::Reliability);
@@ -1362,7 +1358,6 @@ bool ScorpioUdpStream::send_create_packet() {
                                        offset), "Failed to convert stream number to network format");
   serialize_qos(_stream_qos, packet, offset);
   _parent->send_or_panic(Code::CREATE_STREAM, packet, "Failed to send CREATE_STREAM command");
-  return true;
 }
 
 void ScorpioUdpStream::connected() {
