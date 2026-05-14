@@ -609,10 +609,8 @@ SCU_HOT std::optional<std::pair<size_t, std::vector<std::vector<uint8_t>>>> gene
   }
   std::vector<std::vector<uint8_t>> packets;
   packets.reserve(packets_to_send);
-  if (code.is_command_for_stream() != stream_number.has_value()) {
-    return std::nullopt;
-    // panic("Stream number is required for command: " + std::to_string(static_cast<CodeType>(code)));
-  }
+  SCU_ASSERT(code.is_command_for_stream() == stream_number.has_value(),
+    "Stream number must be provided for stream command and must not be provided for non-stream command");
   size_t current = 0;
   const auto first_packet_seq =
     SCU_AS(SeqNumber, sequence_number.fetch_add(packets_to_send, std::memory_order_relaxed));
@@ -631,7 +629,7 @@ SCU_HOT std::optional<std::pair<size_t, std::vector<std::vector<uint8_t>>>> gene
       "Failed to convert code to network format");
       if (code.is_command_for_stream()) {
         SCU_DO_AND_ASSERT(host_to_network(
-        stream_number.value(), packets.back(), packet_pos), "Failed to convert stream number to network format");
+        *stream_number, packets.back(), packet_pos), "Failed to convert stream number to network format");
         SCU_DO_AND_ASSERT(host_to_network(packet_seq++, packets.back(), packet_pos),
           "Failed to convert sequence number to network format");
       }
@@ -957,7 +955,7 @@ void ScorpioUdpConnection::close_stream_packet_handler(const MessageHeader& head
         response.resize(3);
         SCU_DO_AND_ASSERT(host_to_network<uint16_t>(stream_number, response,
                                                  response_offset), "Failed to convert stream number to network format");
-        send(Code::CLOSE_STREAM, response);
+        send(Code::CLOSE_STREAM, response, stream_number);
       } break;
     case Code::CloseStreamSubCommands::CLOSED:
       [[fallthrough]];
@@ -1101,7 +1099,11 @@ void ScorpioUdpConnection::processing_thread() {
       send_or_panic(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) });
       std::this_thread::sleep_for(std::chrono::nanoseconds(SCU_UDP_HEARTBEAT_PERIOD));
     }
+    if (SCU_UNLIKELY((self = self_weak.lock()) == nullptr || _stop.load(std::memory_order_relaxed))) {
+      return;
+    }
     threading::EagerSelectTimeout timeout(SCU_UDP_HEARTBEAT_PERIOD, _time_provider);
+    self.reset();
     timeout.start();
     while (SCU_LIKELY((self = self_weak.lock()) && !_stop.load(std::memory_order_relaxed))) {
       SCU_DEFER([&self] { self.reset(); });
