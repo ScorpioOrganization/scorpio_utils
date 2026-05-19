@@ -1727,10 +1727,10 @@ TEST_F(ScorpioUdpTester, heartbeat_nonexistent_stream_sends_already_closed) {
   std::vector<EventQueueItem> events;
   auto connection_handle = create_connection(events);
   events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
-  // 2-byte heartbeat body: just the stream_id for a stream that doesn't exist.
-  // After reading stream 99, network_to_host finds no more bytes -> loop exits cleanly.
   std::vector<uint8_t> hb_body;
   write_be16(hb_body, static_cast<uint16_t>(99));
+  hb_body.push_back(0);  // ranges
+  write_be16(hb_body, 0);  // initial_end
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
     generate_single_packet(Code::HEARTBEAT, hb_body)) });
   events.push_back({ WHERE, 0, std::make_unique<ExpectPacketAnySeqTimeout>(Ipv4(127, 0, 0, 1), 12345,
