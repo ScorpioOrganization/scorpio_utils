@@ -78,7 +78,6 @@ SCU_UDP_UNRELIABLE_DATA_EXPIRY_NS    = 500'000'000
 SCU_UDP_HEARTBEAT_PERIOD             = 50'000'000  (ns)
 SCU_UDP_TIMEOUT                      = 5'000'000'000
 SCU_UDP_CREATE_RETRY_PERIOD          = 5'000'000'000
-SCU_UDP_DEBUG_LOG_ENABLED            = 0
 ```
 
 ### Threading primitives
