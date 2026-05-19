@@ -947,8 +947,11 @@ void ScorpioUdpConnection::close_stream_packet_handler(const MessageHeader& head
                                                  response_offset), "Failed to convert stream number to network format");
         send(Code::CLOSE_STREAM, response, stream_number);
       } break;
-    case Code::CloseStreamSubCommands::CLOSED:
-      [[fallthrough]];
+    case Code::CloseStreamSubCommands::CLOSED: {
+        if (stream && stream->state() == ScorpioUdpStream::State::CLOSING) {
+          std::ignore = stream->closed();
+        }
+      } break;
     case Code::CloseStreamSubCommands::ALREADY_CLOSED: {
         if (stream) {
           std::ignore = stream->closed();
@@ -957,7 +960,7 @@ void ScorpioUdpConnection::close_stream_packet_handler(const MessageHeader& head
     default: {
         // TODO(@Igor): Handle error properly
         SCU_LOG_ERROR(_logger, "Received unknown CLOSE_STREAM packet with subcommand: {}",
-          static_cast<Code::CloseStreamSubCommands>(subcode));
+          SCU_AS(Code::CloseStreamSubCommands, subcode));
       } break;
   }
 }
@@ -974,6 +977,8 @@ void ScorpioUdpConnection::heartbeat_packet_handler(const MessageHeader& header,
         _sequence_number))) {
         panic("Failed to send CLOSE_STREAM ALREADY_CLOSED response for non-existing stream");
       }
+      const uint8_t ranges = data.data[pos++];
+      pos += (SCU_AS(size_t, ranges) + 1) * sizeof(SeqNumber);
     }
   }
 }
@@ -1279,7 +1284,7 @@ bool ScorpioUdpStream::close() {
 }
 
 SCU_HOT bool ScorpioUdpStream::send(Code code, const std::vector<uint8_t>& data) {
-  if (SCU_UNLIKELY(!is_active())) {
+  if (SCU_UNLIKELY(!is_active() && !(state() == State::CLOSING && code == Code::CLOSE_STREAM))) {
     SCU_LOG_ERROR(_logger, "Attempted to send on inactive stream state: {}", magic_enum::enum_name(state()));
     return false;
   }
@@ -1388,11 +1393,11 @@ void ScorpioUdpStream::update() {
   switch (state()) {
     case State::CREATING: {
         if (_parent->_time_provider->get_time() - _creation_time > SCU_UDP_CREATE_RETRY_PERIOD) {
-          SCU_LOG_INFO(_logger, "Stream creation failed after {} ms, retrying...",
+          SCU_LOG_ERROR(_logger, "Stream creation failed after {} ms",
                         SCU_UDP_CREATE_RETRY_PERIOD / 1'000'000);
-          send_create_packet();
           break;
         }
+        send_create_packet();
       } break;
     case State::CREATED: {
         if (!_stream_qos.is_reliable()) {
