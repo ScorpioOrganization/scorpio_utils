@@ -253,7 +253,7 @@ private:
 
   size_t get_packet_number(SeqNumber seq) noexcept;
 
-  bool send_create_packet();
+  void send_create_packet();
   bool send_close_packet();
   ScorpioUdpStream(
     StreamNumber stream_number, StreamQoS stream_qos,
