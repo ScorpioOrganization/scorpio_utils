@@ -945,7 +945,8 @@ void ScorpioUdpConnection::heartbeat_packet_handler(const MessageHeader& header,
       }
       if (SCU_UNLIKELY(pos >= data.data.size())) {
         SCU_LOG_ERROR(_logger,
-                      "Malformed heartbeat packet: expected ranges byte for stream number {}, but no more data available",
+                      "Malformed heartbeat packet: expected ranges byte for stream number {}, "
+                      "but no more data available",
           stream_num);
         break;
       }
