@@ -41,7 +41,6 @@
 #define SCU_UDP_MAX_PACKET_SIZE (512)
 #define SCU_UDP_QOS_DEPTH_SAFETY_BUFFER (2048)
 #define SCU_UDP_UNRELIABLE_DATA_EXPIRY_NS (500'000'000)  // 500 milliseconds
-#define SCU_UDP_DEBUG_LOG_ENABLED (0)
 #define SCU_UDP_HEARTBEAT_PERIOD (50'000'000)
 #define SCU_UDP_TIMEOUT (5'000'000'000)
 #define SCU_UDP_CREATE_RETRY_PERIOD (5'000'000'000)
@@ -212,9 +211,6 @@ public:
     }
     SCU_ALWAYS_INLINE constexpr bool is_reliable() const noexcept {
       return reliability > Reliability::UNRELIABLE_LATEST_ONLY;
-    }
-    SCU_ALWAYS_INLINE constexpr bool is_ordered() const noexcept {
-      return reliability == Reliability::RELIABLE_ORDERED;
     }
     SCU_ALWAYS_INLINE constexpr bool is_supported() const noexcept {
       return reliability != Reliability::UNRELIABLE_LATEST_ONLY && reliability != Reliability::RELIABLE_UNORDERED;

@@ -19,6 +19,7 @@
 #pragma once
 
 #include <ios>
+#include <memory>
 #include <optional>
 #include <type_traits>
 #include <utility>
@@ -184,4 +185,34 @@ template<typename T>
 struct IsPairWithSameTypes<std::pair<T, T>>: std::true_type {
   using Type = T;
 };
+
+template<typename>
+struct IsUniquePtr : std::false_type {
+  constexpr static bool is_polymorphic = false;
+};
+
+template<typename T, typename Deleter>
+struct IsUniquePtr<std::unique_ptr<T, Deleter>>: std::true_type {
+  using ElementType = T;
+  using DeleterType = Deleter;
+  constexpr static bool is_polymorphic = std::is_polymorphic_v<std::decay_t<T>>;
+};
+
+template<typename T>
+constexpr bool is_unique_ptr_v = IsUniquePtr<std::decay_t<T>>::value;
+
+template<typename>
+struct IsSharedPtr : std::false_type {
+  constexpr static bool is_polymorphic = false;
+};
+
+template<typename T>
+struct IsSharedPtr<std::shared_ptr<T>>: std::true_type {
+  using ElementType = T;
+  constexpr static bool is_polymorphic = std::is_polymorphic_v<std::decay_t<T>>;
+};
+
+template<typename T>
+constexpr bool is_shared_ptr_v = IsSharedPtr<std::decay_t<T>>::value;
+
 }  // namespace scorpio_utils

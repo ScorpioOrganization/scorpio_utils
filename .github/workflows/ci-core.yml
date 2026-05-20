@@ -150,7 +150,6 @@ jobs:
           colcon build \
             --symlink-install \
             --cmake-args \
-              -DNO_DATA_MANAGER=ON \
               -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_VERBOSE_MAKEFILE=OFF \
               -Wno-dev

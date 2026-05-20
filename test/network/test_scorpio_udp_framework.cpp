@@ -1718,3 +1718,39 @@ TEST_F(ScorpioUdpTester, reliable_and_unreliable_concurrent) {
   close_connection(events);
   execute_test(events);
 }
+
+// =====================================================================
+// Suite 7 — heartbeat edge cases
+// =====================================================================
+
+TEST_F(ScorpioUdpTester, heartbeat_nonexistent_stream_sends_already_closed) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  std::vector<uint8_t> hb_body;
+  write_be16(hb_body, static_cast<uint16_t>(99));
+  hb_body.push_back(0);  // ranges
+  write_be16(hb_body, 0);  // initial_end
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::HEARTBEAT, hb_body)) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketAnySeqTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CLOSE_STREAM,
+      { AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED) }, 0, 99)) });
+  close_connection(events);
+  execute_test(events);
+}
+
+TEST_F(ScorpioUdpTester, already_closed_response_closes_active_stream) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = establish_incoming_reliable_stream(events, connection_handle, 1, 16);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  // Peer tells us "this stream is already closed on my side" while our stream is active.
+  // Expected: stream becomes inactive regardless of its current state.
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CLOSE_STREAM,
+      close_stream_payload(1, Code::CloseStreamSubCommands::ALREADY_CLOSED), 0, 1)) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_active(false) });
+  close_connection(events);
+  execute_test(events);
+}

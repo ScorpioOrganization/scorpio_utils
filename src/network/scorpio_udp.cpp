@@ -265,9 +265,7 @@ SCU_NORETURN SCU_COLD void ScorpioUdp::panic(std::string&& message) {
     lock.lock();
     throw PanicException();
   }
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-  std::cerr << "Panic: " << message << "\n" << std::flush;
-#endif
+  SCU_LOG_FATAL(_logger, "Panic: {}", message);
   SCU_UNLIKELY_THROW_IF(_panic.load(std::memory_order_relaxed), PanicException, );
   _panic_message = std::move(message);
   bool expected = false;
@@ -398,9 +396,8 @@ void ScorpioUdp::handle_connect_packet(const MessageHeader& header, const UdpDat
       udp_data.data.size() - header.data_offset);
     return;
   }
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-  std::cerr << "SUBCOMMAND: " << SCU_AS(int, udp_data.data[header.data_offset]) << '\n';
-#endif
+  SCU_LOG_TRACE(_logger, "Handling CONNECT packet from {}:{}. Subcommand: {}",
+    udp_data.ip.str(), udp_data.port, SCU_AS(Code::ConnectionSubCommands, udp_data.data[header.data_offset]));
   switch (SCU_AS(Code::ConnectionSubCommands, udp_data.data[header.data_offset])) {
     case Code::ConnectionSubCommands::CONNECT: {
         if (get_connection(udp_data.ip, udp_data.port)) {
@@ -409,9 +406,6 @@ void ScorpioUdp::handle_connect_packet(const MessageHeader& header, const UdpDat
             { AS_BYTE(Code::ConnectionSubCommands::ALREADY_CONNECTED) },
                     "Failed to send ALREADY_CONNECTED response");
         } else if (_auto_accept.load(std::memory_order_relaxed)) {
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-          std::cerr << "CONNECTING\n";
-#endif
           std::shared_ptr<ScorpioUdpConnection> new_connection(new ScorpioUdpConnection(
                       udp_data.ip, udp_data.port, shared_from_this()));
           new_connection->_start_signal.notify(100000);
@@ -434,14 +428,12 @@ void ScorpioUdp::handle_connect_packet(const MessageHeader& header, const UdpDat
     case Code::ConnectionSubCommands::ACCEPTED: {
         auto connection = get_connection(udp_data.ip, udp_data.port);
         if (!connection) {
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-          std::cerr << "Received ACCEPTED for non-existing connection\n";
-#endif
+          SCU_LOG_ERROR(_logger, "Received ACCEPTED for non-existing connection ip: {}, port: {}",
+          udp_data.ip.str(), udp_data.port);
           // TODO(@Igor): Handle error properly
         } else if (!connection->connected()) {
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-          std::cerr << "Received ACCEPTED for connection not in CONNECTING state\n";
-#endif
+          SCU_LOG_ERROR(_logger, "Received ACCEPTED for connection not in CONNECTING state. ip: {}, port: {}",
+            udp_data.ip.str(), udp_data.port);
           // TODO(@Igor): Handle error properly
         }
       } break;
@@ -449,9 +441,8 @@ void ScorpioUdp::handle_connect_packet(const MessageHeader& header, const UdpDat
         auto connection = get_connection(udp_data.ip, udp_data.port);
         if (!connection) {
           // TODO(@Igor): Handle error properly
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-          std::cerr << "Got connection response for non existing connection request\n";
-#endif
+          SCU_LOG_ERROR(_logger, "Received REJECTED for non-existing connection ip: {}, port: {}",
+            udp_data.ip.str(), udp_data.port);
         } else {
           connection->_state = ScorpioUdpConnection::State::REJECTED;
         }
@@ -460,16 +451,14 @@ void ScorpioUdp::handle_connect_packet(const MessageHeader& header, const UdpDat
         auto connection = get_connection(udp_data.ip, udp_data.port);
         if (!connection) {
           // TODO(@Igor): Handle properly
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-          std::cerr << "Received 'ALREADY_CONNECTED' packet from non existing connection\n";
-#endif
+          SCU_LOG_ERROR(_logger, "Received ALREADY_CONNECTED for non-existing connection ip: {}, port: {}",
+            udp_data.ip.str(), udp_data.port);
         }
       } break;
     default: {
         // TODO(@Igor): Handle error properly
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-        std::cerr << "Received unknown connect packet\n";
-#endif
+        SCU_LOG_ERROR(_logger, "Received unknown CONNECT subcommand: {} from {}:{}", udp_data.data[header.data_offset],
+          udp_data.ip.str(), udp_data.port);
       } break;
   }
 }
@@ -478,9 +467,8 @@ SCU_HOT void ScorpioUdp::process_packet(UdpData udp_data) {
   auto header_opt = parse_header(udp_data.data);
   if (SCU_UNLIKELY(header_opt.is_err())) {
     // TODO(@Igor): Handle error properly
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-    std::cerr << "Failed to parse UDP packet header: " << header_opt.err_value() << "\n";
-#endif
+    SCU_LOG_ERROR(_logger, "Failed to parse UDP packet header from {}:{}. Error: {}",
+      udp_data.ip.str(), udp_data.port, header_opt.err_value());
     return;
   }
   auto header = std::move(header_opt).ok_value();
@@ -533,15 +521,10 @@ void ScorpioUdp::pull_awaiting_connections(std::weak_ptr<ScorpioUdpConnection> c
           connection->remote_port(), { AS_BYTE(Code::ConnectionSubCommands::CONNECT) });
       connection->_state.store(ScorpioUdpConnection::State::CONNECTING, std::memory_order_relaxed);
       _connections.insert({ { connection->remote_ip(), connection->remote_port() }, std::move(connection) });
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-      std::cerr << "Added new connection " << connection->remote_ip().str() << ":" << connection->remote_port() <<
-        "\n";
-#endif
+      SCU_LOG_INFO(_logger, "Added new connection {}:{}", connection->remote_ip().str(), connection->remote_port());
     }
   } else {
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-    std::cerr << "Awaiting connection weak_ptr is expired\n";
-#endif
+    SCU_LOG_TRACE(_logger, "Awaiting connection expired before it could be processed");
   }
 }
 
@@ -549,18 +532,6 @@ std::shared_ptr<ScorpioUdpConnection> scorpio_utils::network::ScorpioUdp::get_co
   Ipv4 remote_ip,
   Port remote_port) {
   auto connection_iter = _connections.find({ remote_ip, remote_port });
-  for (auto& [key, weak_conn] : _connections) {
-    if (auto conn = weak_conn.lock()) {
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-      std::cerr << "Connection: " << key.first.str() << ":" << key.second << " State: "
-                << SCU_AS(int, conn->state()) << "\n";
-#endif
-    } else {
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-      std::cerr << "Connection: " << key.first.str() << ":" << key.second << " State: expired\n";
-#endif
-    }
-  }
   std::shared_ptr<ScorpioUdpConnection> ans;
   if (connection_iter == _connections.end()) {
     while (auto connection_opt = _awaiting_connections_channel.receive()) {
@@ -574,9 +545,7 @@ std::shared_ptr<ScorpioUdpConnection> scorpio_utils::network::ScorpioUdp::get_co
     }
     connection_iter = _connections.find({ remote_ip, remote_port });
     if (connection_iter == _connections.end()) {
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-      std::cerr << "No connection found for " << remote_ip.str() << ":" << remote_port << "\n";
-#endif
+      SCU_LOG_TRACE(_logger, "No connection found for {}:{}", remote_ip.str(), remote_port);
       return std::shared_ptr<ScorpioUdpConnection>(nullptr);
     }
   } else {
@@ -602,9 +571,8 @@ SCU_HOT std::optional<std::pair<size_t, std::vector<std::vector<uint8_t>>>> gene
   const auto header_without_frames_left_size = calculate_header_without_frames_left_size(code);
   const auto packets_to_send = packets_count(data.size(), header_without_frames_left_size);
   if (SCU_UNLIKELY(packets_to_send > 65537)) {
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-    std::cerr << "Socket is not open or data is too large\n";
-#endif
+    // SCU_LOG_ERROR(_logger, "Data is too large to send: {} bytes, max is {} bytes",
+    // packets_to_send, 65537);
     return std::nullopt;
   }
   std::vector<std::vector<uint8_t>> packets;
@@ -724,9 +692,7 @@ ScorpioUdpConnection::ScorpioUdpConnection(Ipv4 remote_ip, Port remote_port, std
 }
 
 bool ScorpioUdpConnection::connected() {
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-  std::cerr << "MAYBE CONNECTED TO: " << _remote_ip << ":" << _remote_port << '\n';
-#endif
+  SCU_LOG_INFO(_logger, "Connection {}:{} is now connected", _remote_ip.str(), _remote_port);
   State expected = State::CONNECTING;
   return _state.compare_exchange_strong(
     expected,
@@ -814,44 +780,35 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
         StreamNumber stream_number;
         if (!network_to_host(data.data, &stream_number, offset)) {
           // TODO(@Igor): Handle error properly
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-          std::cerr << "Failed to parse ACCEPT CREATE_STREAM stream number\n";
-#endif
+          SCU_LOG_ERROR(_logger, "Failed to parse stream number from ACCEPT CREATE_STREAM packet");
           return;
         }
         auto stream = _streams[stream_number].lock();
         if (!stream) {
           // TODO(@Igor): Handle error properly
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-          std::cerr << "Received ACCEPT for non-existing stream\n";
-#endif
+          SCU_LOG_ERROR(_logger, "Received ACCEPT for non-existing stream number {}", stream_number);
           return;
         }
         if (!stream->is_alive()) {
           // TODO(@Igor): Handle error properly
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-          std::cerr << "Received ACCEPT for stream not in CREATING state\n";
-#endif
+          SCU_LOG_ERROR(_logger, "Received ACCEPT for stream number {} not in CREATING state", stream_number);
           return;
         }
         auto qos_opt = parse_qos(data.data, offset);
         if (!qos_opt) {
           // TODO(@Igor): Handle error properly
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-          std::cerr << "Failed to parse ACCEPT CREATE_STREAM QoS\n";
-#endif
+          SCU_LOG_ERROR(_logger, "Failed to parse QoS from ACCEPT CREATE_STREAM packet for stream number {}",
+            stream_number);
           return;
         }
         if (*qos_opt != stream->qos()) {
           // TODO(@Igor): Handle error properly
           stream->panic("Peer accepted stream with different QoS");
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-          std::cerr << "Received ACCEPT for stream with different QoS\n";
-          std::cerr << "Expected reliability: " << SCU_AS(int, stream->qos().reliability)
-                    << " got: " << SCU_AS(int, qos_opt->reliability) << "\n";
-          std::cerr << "Expected depth: " << stream->qos().depth
-                    << " got: " << qos_opt->depth << "\n";
-#endif
+          SCU_LOG_ERROR(_logger,
+                        "Received ACCEPT for stream number {} with different QoS. "
+                        "Expected reliability: {}, got: {}. Expected depth: {}, got: {}",
+            stream_number, SCU_AS(int, stream->qos().reliability), SCU_AS(int, qos_opt->reliability),
+            stream->qos().depth, qos_opt->depth);
           return;
         }
         stream->connected();
@@ -862,9 +819,7 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
         StreamNumber stream_number;
         if (!network_to_host(data.data, &stream_number, offset)) {
           // TODO(@Igor): Handle error properly
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-          std::cerr << "Failed to parse ALREADY_EXISTS CREATE_STREAM stream number\n";
-#endif
+          SCU_LOG_ERROR(_logger, "Failed to parse stream number from ALREADY_EXISTS CREATE_STREAM packet");
           return;
         }
       } break;
@@ -915,9 +870,10 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
 void ScorpioUdpConnection::close_stream_packet_handler(const MessageHeader& header, UdpData&& data) {
   if (data.data.size() - header.data_offset != sizeof(Code::CloseStreamSubCommands) + sizeof(StreamNumber)) {
     // TODO(@Igor): Handle error properly
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-    std::cerr << "Invalid CLOSE_STREAM packet size\n";
-#endif
+    SCU_LOG_ERROR(_logger,
+      "Invalid CLOSE_STREAM packet size: expected {} bytes, got {} bytes",
+      sizeof(Code::CloseStreamSubCommands) + sizeof(StreamNumber),
+      data.data.size() - header.data_offset);
     return;
   }
   size_t offset = header.data_offset;
@@ -953,21 +909,25 @@ void ScorpioUdpConnection::close_stream_packet_handler(const MessageHeader& head
           }
         }
         response.resize(3);
-        SCU_DO_AND_ASSERT(host_to_network<uint16_t>(stream_number, response,
+        SCU_DO_AND_ASSERT(host_to_network<StreamNumber>(stream_number, response,
                                                  response_offset), "Failed to convert stream number to network format");
         send(Code::CLOSE_STREAM, response, stream_number);
       } break;
-    case Code::CloseStreamSubCommands::CLOSED:
-      [[fallthrough]];
-    case Code::CloseStreamSubCommands::ALREADY_CLOSED: {
+    case Code::CloseStreamSubCommands::CLOSED: {
         if (stream) {
           std::ignore = stream->closed();
+        }
+      } break;
+    case Code::CloseStreamSubCommands::ALREADY_CLOSED: {
+        if (stream) {
+          stream->_state.store(ScorpioUdpStream::State::CLOSING, std::memory_order_relaxed);
+          SCU_DO_AND_ASSERT(stream->closed(), "Failed to close stream in response to ALREADY_CLOSED");
         }
       } break;
     default: {
         // TODO(@Igor): Handle error properly
         SCU_LOG_ERROR(_logger, "Received unknown CLOSE_STREAM packet with subcommand: {}",
-          static_cast<Code::CloseStreamSubCommands>(subcode));
+          SCU_AS(Code::CloseStreamSubCommands, subcode));
       } break;
   }
 }
@@ -979,8 +939,13 @@ void ScorpioUdpConnection::heartbeat_packet_handler(const MessageHeader& header,
     if (auto stream = get_stream(stream_num)) {
       stream->handle_heartbeat_data(data.data, pos);
     } else {
-      // TODO(@Igor): Handle non-existing stream found inside heartbeat
-      SCU_LOG_ERROR(_logger, "Received heartbeat data for non-existing stream number {}", stream_num);
+      SCU_LOG_WARNING(_logger, "Received heartbeat data for non-existing stream number {}", stream_num);
+      if (SCU_UNLIKELY(!send(Code::CLOSE_STREAM, { AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED) }, stream_num,
+        _sequence_number))) {
+        panic("Failed to send CLOSE_STREAM ALREADY_CLOSED response for non-existing stream");
+      }
+      const uint8_t ranges = data.data[pos++];
+      pos += (SCU_AS(size_t, ranges) * 2 + 1) * sizeof(SeqNumber);
     }
   }
 }
@@ -1036,10 +1001,8 @@ void ScorpioUdpConnection::pull_awaiting_streams(std::shared_ptr<scorpio_utils::
 void ScorpioUdpConnection::process_packets(
   std::pair<scorpio_utils::network::MessageHeader,
   scorpio_utils::network::UdpData> packet) {
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-  std::cerr << "Processing packet from " << packet.second.ip.str() << ":" << packet.second.port << "of size "
-            << packet.second.data.size() << " bytes\n";
-#endif
+  SCU_LOG_TRACE(_logger, "Processing packet from {}:{}. Packet size: {} bytes",
+      packet.second.ip.str(), packet.second.port, packet.second.data.size());
   _last_received_packet_time.store(_time_provider->get_time(), std::memory_order_relaxed);
   handle_new_packet(packet.first, std::move(packet.second));
 }
@@ -1135,9 +1098,7 @@ SCU_COLD SCU_NORETURN void ScorpioUdpConnection::panic(std::string&& message) {
     lock.lock();
     throw PanicException();
   }
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-  std::cerr << "Connection panic: " << message << "\n";
-#endif
+  SCU_LOG_FATAL(_logger, "Connection panic: {}", message);
   _panic_message = std::move(message);
   _panic.store(true, std::memory_order_release);
   _state.store(State::ERROR, std::memory_order_relaxed);
@@ -1261,7 +1222,7 @@ ScorpioUdpStream::ScorpioUdpStream(
 ScorpioUdpStream::~ScorpioUdpStream() {
   close();
   bool expected = true;
-  SCU_ASSERT(_parent->_stream_exists[_stream_number].compare_exchange_strong(
+  SCU_DO_AND_ASSERT(_parent->_stream_exists[_stream_number].compare_exchange_strong(
       expected,
       false,
       std::memory_order_relaxed,
@@ -1288,7 +1249,7 @@ bool ScorpioUdpStream::close() {
 }
 
 SCU_HOT bool ScorpioUdpStream::send(Code code, const std::vector<uint8_t>& data) {
-  if (SCU_UNLIKELY(!is_active())) {
+  if (SCU_UNLIKELY(!is_active() && !(state() == State::CLOSING && code == Code::CLOSE_STREAM))) {
     SCU_LOG_ERROR(_logger, "Attempted to send on inactive stream state: {}", magic_enum::enum_name(state()));
     return false;
   }
@@ -1388,7 +1349,7 @@ bool ScorpioUdpStream::send_close_packet() {
   packet.resize(3);
   packet[0] = AS_BYTE(Code::CloseStreamSubCommands::CLOSE);
   size_t offset = 1;
-  SCU_DO_AND_ASSERT(host_to_network<uint16_t>(_stream_number, packet,
+  SCU_DO_AND_ASSERT(host_to_network<StreamNumber>(_stream_number, packet,
                                        offset), "Failed to convert stream number to network format");
   return send(Code::CLOSE_STREAM, packet);
 }
@@ -1397,9 +1358,8 @@ void ScorpioUdpStream::update() {
   switch (state()) {
     case State::CREATING: {
         if (_parent->_time_provider->get_time() - _creation_time > SCU_UDP_CREATE_RETRY_PERIOD) {
-          SCU_LOG_ERROR(_logger, "Stream creation failed after {} ms, retrying...",
+          SCU_LOG_ERROR(_logger, "Stream creation failed after {} ms",
                         SCU_UDP_CREATE_RETRY_PERIOD / 1'000'000);
-          close();
           break;
         }
         send_create_packet();
@@ -1495,9 +1455,8 @@ void ScorpioUdpStream::handle_data_packet(const MessageHeader& header, UdpData&&
       if (iter == partial_data.first_frames.end()) {
         return;
       }
-#if SCU_UDP_DEBUG_LOG_ENABLED == 1
-      std::cerr << "Current seq number: " << seq_number << ", first frame seq: " << *iter << "\n";
-#endif
+      SCU_LOG_TRACE(_logger, "Received non-first packet on stream {}: seq {}. First frame seq: {}", _stream_number,
+        seq_number, *iter);
       start = partial_data.received_frames.find(*iter);
       SCU_ASSERT(start != partial_data.received_frames.end(), "Inconsistent state");
       SCU_ASSERT(start->second.header.is_first, "Inconsistent state");
