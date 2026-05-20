@@ -82,6 +82,8 @@ SCU_UDP_TIMEOUT                      = 5'000'000'000
 SCU_UDP_CREATE_RETRY_PERIOD          = 5'000'000'000
 ```
 
+The scorpio_udp protocol is described in @SCORPIO_UDP_PROTOCOL.md.
+
 ### Threading primitives
 
 [threading/](include/scorpio_utils/threading/) is the largest module. Notable pieces:
