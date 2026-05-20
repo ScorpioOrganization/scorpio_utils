@@ -1730,12 +1730,74 @@ TEST_F(ScorpioUdpTester, heartbeat_nonexistent_stream_sends_already_closed) {
   std::vector<uint8_t> hb_body;
   write_be16(hb_body, static_cast<uint16_t>(99));
   hb_body.push_back(0);  // ranges
-  write_be16(hb_body, 0);  // initial_end
+  write_be32(hb_body, 0);  // initial_end
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
     generate_single_packet(Code::HEARTBEAT, hb_body)) });
   events.push_back({ WHERE, 0, std::make_unique<ExpectPacketAnySeqTimeout>(Ipv4(127, 0, 0, 1), 12345,
     generate_single_packet(Code::CLOSE_STREAM,
       { AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED) }, 0, 99)) });
+  close_connection(events);
+  execute_test(events);
+}
+
+TEST_F(ScorpioUdpTester, heartbeat_nonexistent_stream_between_retransmit_streams) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+
+  // Streams 2 and 5 are active outgoing reliable streams; stream 99 is intentionally absent.
+  // Drain between creates to discard any CREATE_STREAM:CREATE retransmits for stream 2 that
+  // may be queued while stream_is_active polls (advancing time triggers heartbeat/update).
+  auto stream_a = create_outgoing_reliable_stream(events, connection_handle, 2, 16);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  auto stream_b = create_outgoing_reliable_stream(events, connection_handle, 5, 16);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+
+  std::vector<std::vector<uint8_t>> payloads_a;
+  std::vector<std::vector<uint8_t>> payloads_b;
+  for (SeqNumber i = 0; i < 3; ++i) {
+    payloads_a.push_back({ static_cast<uint8_t>(i * 2u), static_cast<uint8_t>(i * 2u + 1u) });
+    payloads_b.push_back({ static_cast<uint8_t>(0x80u | (i * 2u)), static_cast<uint8_t>(0x80u | (i * 2u + 1u)) });
+  }
+  for (const auto& p : payloads_a) {
+    events.push_back({ WHERE, 0, stream_a->stream_send(p) });
+  }
+  for (const auto& p : payloads_b) {
+    events.push_back({ WHERE, 0, stream_b->stream_send(p) });
+  }
+  for (SeqNumber seq = 0; seq < 3; ++seq) {
+    events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+      stream_data_packet(2, seq, payloads_a[seq])) });
+  }
+  for (SeqNumber seq = 0; seq < 3; ++seq) {
+    events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+      stream_data_packet(5, seq, payloads_b[seq])) });
+  }
+
+  // One heartbeat carries three stream entries:
+  // stream 2  : initial_end=1, held=[2,3) -> peer received seq 0 and seq 2 but missed seq 1
+  // stream 99 : nonexistent (0 ranges)    -> must elicit CLOSE_STREAM ALREADY_CLOSED
+  // stream 5  : initial_end=1, held=[2,3) -> same gap as stream 2, retransmit seq 1
+  // heartbeat_packet_handler processes entries in order, so responses arrive:
+  // retransmit stream 2 seq 1, CLOSE_STREAM for 99, retransmit stream 5 seq 1.
+  std::vector<uint8_t> hb_body;
+  const auto hb_a = generate_heartbeat_body(2, /*initial_end=*/ 1, /*held_ranges=*/ { { 2u, 3u } });
+  hb_body.insert(hb_body.end(), hb_a.begin(), hb_a.end());
+  write_be16(hb_body, static_cast<uint16_t>(99));
+  hb_body.push_back(0);
+  write_be32(hb_body, 0);
+  const auto hb_b = generate_heartbeat_body(5, /*initial_end=*/ 1, /*held_ranges=*/ { { 2u, 3u } });
+  hb_body.insert(hb_body.end(), hb_b.begin(), hb_b.end());
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::HEARTBEAT, hb_body)) });
+
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    stream_data_packet(2, 1, payloads_a[1])) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketAnySeqTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CLOSE_STREAM,
+      { AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED) }, 0, 99)) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    stream_data_packet(5, 1, payloads_b[1])) });
+
   close_connection(events);
   execute_test(events);
 }
