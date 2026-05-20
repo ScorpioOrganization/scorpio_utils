@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+Do not edit implementations unless explicitly asked for - by implementation I don't mean tests, those may be freely edited. If you find an issue report it instead of fixing by yourself.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project
