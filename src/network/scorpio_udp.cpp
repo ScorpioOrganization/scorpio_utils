@@ -160,14 +160,14 @@ ScorpioUdp::ScorpioUdp(
       result->set_time_offset(SCU_UDP_HEARTBEAT_PERIOD / 2);
       return result;
     }()),
-  _new_connections(nullptr),
 #ifdef SCU_UDP_MOCK
   _socket(socket),
 #endif
   _auto_accept(false),
   _stop(true),
   _logger(logger),
-  _panic(false)
+  _panic(false),
+  _new_connections(nullptr)
 {
   SCU_LOG_INFO(_logger, "ScorpioUdp created");
 }
