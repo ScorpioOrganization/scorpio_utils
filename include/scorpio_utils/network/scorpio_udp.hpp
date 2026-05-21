@@ -350,11 +350,11 @@ private:
 
   bool connected();
 
+  uint16_t _next_stream_to_heartbeat;
   threading::Channel<std::pair<MessageHeader, UdpData>, 1024 * 1024> _incoming_packets;
   threading::Channel<std::shared_ptr<ScorpioUdpStream>, 1024> _awaiting_streams;
   std::array<std::weak_ptr<ScorpioUdpStream>, std::numeric_limits<StreamNumber>::max() + 1> _streams;
   std::array<std::atomic<bool>, std::numeric_limits<StreamNumber>::max() + 1> _stream_exists;
-  uint16_t _next_stream_to_heartbeat;
   std::thread _processing_thread;
   std::shared_ptr<ScorpioUdpStream> get_stream(StreamNumber);
   void handle_new_packet(const MessageHeader& header, UdpData&& data);

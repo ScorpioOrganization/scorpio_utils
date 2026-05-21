@@ -694,8 +694,8 @@ ScorpioUdpConnection::ScorpioUdpConnection(Ipv4 remote_ip, Port remote_port, std
   _time_provider(_parent->_time_provider),
   _last_received_packet_time(_time_provider->get_time()),
   _logger(_parent->_logger),
-  _stream_exists{false},
   _next_stream_to_heartbeat(0),
+  _stream_exists{false},
   _processing_thread(&ScorpioUdpConnection::processing_thread, this) {
 }
 
@@ -1532,7 +1532,7 @@ size_t ScorpioUdpStream::get_packet_number(const SeqNumber v) noexcept {
     complement = SCU_AS(size_t, sat_sub<SeqNumberComplement>(_sequence_complement, 1));
   } else if (_last_greatest_sequence_number > v &&
     _last_greatest_sequence_number - v > (std::numeric_limits<SeqNumber>::max() / 2)) {
-    complement = SCU_AS(size_t, _sequence_complement++);
+    complement = SCU_AS(size_t, ++_sequence_complement);
     _last_greatest_sequence_number = v;
   } else if (_last_greatest_sequence_number < v) {
     complement = SCU_AS(size_t, _sequence_complement);
@@ -1540,7 +1540,7 @@ size_t ScorpioUdpStream::get_packet_number(const SeqNumber v) noexcept {
   } else {
     complement = SCU_AS(size_t, _sequence_complement);
   }
-  return complement * (SCU_AS(size_t, std::numeric_limits<SeqNumber>::max()) + 1) + SCU_AS(size_t, v);
+  return (complement << (sizeof(SeqNumber) * 8)) + SCU_AS(size_t, v);
 }
 
 bool ScorpioUdpStream::append_heartbeat_data(std::vector<uint8_t>& heartbeat_data) const {
@@ -1598,6 +1598,8 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
   if (SCU_UNLIKELY(!_stream_qos.is_reliable())) {
     SCU_LOG_ERROR(_logger, "Received heartbeat for unreliable stream, which is not expected");
     pos += (SCU_AS(size_t, range_count) * 2 + 1) * sizeof(SeqNumber);
+    // TODO(@Igor): We probably want to send some error
+    // close();
     return;
   }
   SeqNumber end;
