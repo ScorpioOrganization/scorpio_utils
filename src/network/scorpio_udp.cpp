@@ -756,7 +756,7 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
               response_code = Code::CreateStreamSubCommands::REJECT_SIMILAR_EXISTED;
             }
             break;
-          } else if (!_auto_accept_stream.load(std::memory_order_relaxed)) {
+          } else if (!(_auto_accept_stream.load(std::memory_order_relaxed) && qos_opt->is_supported())) {
             response_code = Code::CreateStreamSubCommands::REJECT;
             break;
           } else if (_stream_exists[stream_number].compare_exchange_strong(
@@ -1587,10 +1587,6 @@ bool ScorpioUdpStream::append_heartbeat_data(std::vector<uint8_t>& heartbeat_dat
 void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, size_t& pos) {
   SCU_LOG_TRACE(_logger, "Handling heartbeat data for stream {} with data size {} bytes", _stream_number,
     data.size() - pos);
-  if (SCU_UNLIKELY(!_stream_qos.is_reliable())) {
-    SCU_LOG_ERROR(_logger, "Received heartbeat for unreliable stream, which is not expected");
-    return;
-  }
   if (SCU_UNLIKELY(data.size() <= pos)) {
     SCU_LOG_ERROR(_logger,
                   "Invalid heartbeat data size for stream {}: expected at least 1 byte for range count, got {}",
@@ -1598,6 +1594,11 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
     return;
   }
   uint8_t range_count = data[pos++];
+  if (SCU_UNLIKELY(!_stream_qos.is_reliable())) {
+    SCU_LOG_ERROR(_logger, "Received heartbeat for unreliable stream, which is not expected");
+    pos += (SCU_AS(size_t, range_count) * 2 + 1) * sizeof(SeqNumber);
+    return;
+  }
   SeqNumber end;
   if (SCU_UNLIKELY(!network_to_host(data, &end, pos))) {
     SCU_LOG_ERROR(_logger, "Failed to parse end sequence number from heartbeat data for stream {}", _stream_number);
