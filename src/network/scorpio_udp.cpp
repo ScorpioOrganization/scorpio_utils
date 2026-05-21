@@ -527,8 +527,9 @@ void ScorpioUdp::pull_awaiting_connections(std::weak_ptr<ScorpioUdpConnection> c
       send_or_panic(std::nullopt, _mock_sequence_number, Code::CONNECT, connection->remote_ip(),
           connection->remote_port(), { AS_BYTE(Code::ConnectionSubCommands::CONNECT) });
       connection->_state.store(ScorpioUdpConnection::State::CONNECTING, std::memory_order_relaxed);
-      _connections.insert({ { connection->remote_ip(), connection->remote_port() }, std::move(connection) });
-      SCU_LOG_INFO(_logger, "Added new connection {}:{}", connection->remote_ip().str(), connection->remote_port());
+      auto address_pair = std::make_pair(connection->remote_ip(), connection->remote_port());
+      _connections.insert({ address_pair, std::move(connection) });
+      SCU_LOG_INFO(_logger, "Added new connection {}:{}", address_pair.first.str(), address_pair.second);
     }
   } else {
     SCU_LOG_TRACE(_logger, "Awaiting connection expired before it could be processed");
