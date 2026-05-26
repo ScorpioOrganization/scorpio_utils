@@ -939,7 +939,7 @@ void ScorpioUdpConnection::heartbeat_packet_handler(const MessageHeader& header,
     if (auto stream = get_stream(stream_num)) {
       stream->handle_heartbeat_data(data.data, pos);
     } else {
-      SCU_LOG_WARNING(_logger, "Received heartbeat data for non-existing stream number {}", stream_num);
+      SCU_LOG_DEBUG(_logger, "Received heartbeat data for non-existing stream number {}", stream_num);
       std::vector<uint8_t> response;
       response.reserve(3);
       response.emplace_back(AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED));

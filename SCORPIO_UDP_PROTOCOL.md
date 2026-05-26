@@ -127,6 +127,15 @@ Last packet:
 
 Each command packet carries a 1-byte subcommand as the first payload byte.
 
+**PING subcommands:**
+
+| Value | Name | Direction |
+|-------|------|-----------|
+| 0 | PING | initiator -> peer |
+| 1 | PONG | peer -> initiator |
+
+> PING is only partially implemented; treat it as experimental.
+
 **CONNECT subcommands:**
 
 | Value | Name | Direction |
@@ -321,20 +330,23 @@ Reliable streams use a **NACK-based retransmission** mechanism piggybacked onto 
 3. **Every heartbeat (50ms)**, the receiver encodes its held ranges into a HEARTBEAT packet.
 4. **Sender** reads the HEARTBEAT, finds gaps between the reported ranges, and resends missing packets from `_sent_history`.
 
-### HEARTBEAT packet payload (per stream)
+### HEARTBEAT packet payload
+
+A single HEARTBEAT packet carries ACK/NACK state for one or more reliable streams. The command byte appears **once**; each reliable stream then contributes one block, packed back-to-back until the 512-byte packet is full.
 
 ```
-+----------+--------------+-------+------+-------+------+-------+
-|  cmd     | StreamNumber | count | end0 | beg1  | end1 | beg2  | ...
-|  1 B     |    2 B       |  1 B  |  4 B |  4 B  |  4 B |  4 B  |
-+----------+--------------+-------+------+-------+------+-------+
++----------+     +--------------+-------+------+-------+------+-------+------+----
+|  cmd     |     | StreamNumber | count | end0 | beg1  | end1 | beg2  | end2 | ...
+|  1 B     |     |    2 B       |  1 B  |  4 B |  4 B  |  4 B |  4 B  |  4 B |
++----------+     +--------------+-------+------+-------+------+-------+------+----
+                 \________________ repeated per reliable stream ______________/
 ```
 
-- `count` = number of gap ranges (count+1 ranges reported)
-- `end0` = last received sequence number (contiguous from start)
-- Each `(begin, end)` pair describes a held range above a gap
+- `count` = number of gap ranges for this stream (`count + 1` ranges reported total)
+- `end0` = next expected sequence number (one past the last contiguously received packet)
+- Each following `(begin, end)` pair describes a held range that sits above a gap
 
-The sender resends all sequence numbers in `[end_i, begin_{i+1})` that are still within its history window.
+The sender reads each stream block in turn and resends every sequence number in `[end_i, begin_{i+1})` that is still within its history window.
 
 ### Sequence number wrapping
 
@@ -344,9 +356,10 @@ The sender resends all sequence numbers in `[end_i, begin_{i+1})` that are still
 
 Large messages are split automatically:
 
-- Max payload per packet: `512 - header_size` bytes
-- First packet uses the full available space (no `FramesLeft` field)
-- Subsequent packets include `FramesLeft` counting down to 1, then the last packet has no `FramesLeft`
+- A single-packet message carries no `FramesLeft` field (`FIRST` set, `NOT_LAST` clear)
+- When fragmented, every packet except the last carries `FramesLeft` (counting down); the first fragment additionally sets the `FIRST` flag
+- The last packet clears `NOT_LAST` and omits `FramesLeft`
+- Usable payload is `512 - header_size`; fragmented packets lose a further 2 bytes to the `FramesLeft` field
 
 On the receive side:
 - **Reliable streams**: the `Orderer` reassembles fragments in sequence order before delivering
@@ -365,6 +378,6 @@ On the receive side:
 | `SCU_UDP_MAX_PACKET_SIZE` | 512 bytes | Maximum UDP payload |
 | `SCU_UDP_HEARTBEAT_PERIOD` | 50 ms | Heartbeat interval |
 | `SCU_UDP_TIMEOUT` | 5 s | No-packet timeout before disconnect |
-| `SCU_UDP_CREATE_RETRY_PERIOD` | 5 s | Stream creation retry timeout |
+| `SCU_UDP_CREATE_RETRY_PERIOD` | 5 s | Stream creation give-up timeout (CREATE retried every heartbeat until this elapses) |
 | `SCU_UDP_UNRELIABLE_DATA_EXPIRY_NS` | 500 ms | Expiry for incomplete unreliable fragments |
 | `SCU_UDP_QOS_DEPTH_SAFETY_BUFFER` | 2048 | Extra history slots beyond QoS depth |
