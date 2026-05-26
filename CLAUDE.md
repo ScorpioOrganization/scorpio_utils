@@ -27,7 +27,7 @@ colcon test-result --verbose
 ./build/scorpio_utils/<test_name> --gtest_filter='Suite.Case'
 ```
 
-Compiler flags are strict: `-std=c++17 -Wall -Wextra -Wpedantic -pedantic-errors -Wconversion -Wsign-conversion -Werror`. Any new warning fails the build — fix the root cause instead of suppressing.
+Compiler flags are strict: `-std=c++17 -Wall -Wextra -Wpedantic -pedantic-errors -Wdeprecated -Wc++17-compat -Wconversion -Wsign-conversion -Wpessimizing-move -Werror`. Any new warning fails the build — fix the root cause instead of suppressing.
 
 Linting (mirrors `.github/workflows/ci-core.yml`; CI gates merges to `master`):
 
@@ -102,6 +102,18 @@ Code that reads "now" takes a `time_provider::TimeProvider*` rather than calling
 
 [ros/](include/scorpio_utils/ros/) is the only directory that links `rclcpp` into the public API. `RosVariable<T, IgnoreSameValue>` ([ros_variable.hpp](include/scorpio_utils/ros/ros_variable.hpp)) wraps a publisher/subscriber pair around a single value type. The non-ROS modules (`threading`, `network`, `geometry`, …) do not include `rclcpp` and should stay that way — keep the dependency contained.
 
+### Vendored submodule: `itertools`
+
+[itertools/](itertools/) is a **git submodule** (`github.com/igorosky/itertools.git`, Apache-2.0 — distinct from this package's Proprietary license). It is a self-contained header-only library that is **not** wired into the `colcon` build, not listed in `LIBRARY_LIST`, and not referenced by any `scorpio_utils` code. Populate it with `git submodule update --init --recursive`; it builds and tests on its own, not via colcon:
+
+```bash
+cd itertools && mkdir -p build && cd build
+cmake -DTESTING=ON .. && cmake --build .
+./tests
+```
+
+Don't add it to the package build or include it from package headers unless that integration is explicitly requested.
+
 ## Conventions
 
 - C++17 only. No `std::expected`, `std::format`, structured bindings in `if`, etc. — use `Expected` and `fmt::format` instead.
@@ -109,3 +121,4 @@ Code that reads "now" takes a `time_provider::TimeProvider*` rather than calling
 - Public headers must be self-contained and use angle-quoted absolute includes (`#include "scorpio_utils/foo.hpp"`).
 - License header (GPL-3.0-or-later block in [prelude.hpp](include/scorpio_utils/prelude.hpp)) appears at the top of source files but is *disabled* in cpplint config — don't add the cpplint copyright check back.
 - Architecture is detected at CMake time and exposed as `ARCH_X64` / `ARCH_ARM` / `ARCH_UNKNOWN` defines. Use these rather than re-detecting in code.
+- `DOCKER_BUILD` is defined when CMake is invoked with `-DDOCKER_BUILD=ON` (container/CI builds); guard container-only behavior behind it.
