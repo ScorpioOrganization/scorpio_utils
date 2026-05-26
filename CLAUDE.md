@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+Do not edit implementations unless explicitly asked for - by implementation I don't mean tests, those may be freely edited. If you find an issue report it instead of fixing by yourself.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project
@@ -79,6 +81,8 @@ SCU_UDP_HEARTBEAT_PERIOD             = 50'000'000  (ns)
 SCU_UDP_TIMEOUT                      = 5'000'000'000
 SCU_UDP_CREATE_RETRY_PERIOD          = 5'000'000'000
 ```
+
+The scorpio_udp protocol is described in @SCORPIO_UDP_PROTOCOL.md.
 
 ### Threading primitives
 

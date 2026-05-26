@@ -339,7 +339,6 @@ private:
   std::atomic<State> _state;
   std::shared_ptr<ScorpioUdp> _parent;
   std::string _panic_message;
-  threading::Channel<std::shared_ptr<ScorpioUdpStream>, 1024> _new_streams;
   std::atomic<bool> _auto_accept_stream;
   std::atomic<bool> _stop;
   std::shared_ptr<TimeProvider> _time_provider;
@@ -348,15 +347,16 @@ private:
   threading::Signal _start_signal;
   std::shared_ptr<logger::Logger> _logger;
 
-  bool connected();
 
+  uint16_t _next_stream_to_heartbeat;
+  std::mutex _close_mutex;
+  threading::Channel<std::shared_ptr<ScorpioUdpStream>, 1024> _new_streams;
   threading::Channel<std::pair<MessageHeader, UdpData>, 1024 * 1024> _incoming_packets;
   threading::Channel<std::shared_ptr<ScorpioUdpStream>, 1024> _awaiting_streams;
   std::array<std::weak_ptr<ScorpioUdpStream>, std::numeric_limits<StreamNumber>::max() + 1> _streams;
   std::array<std::atomic<bool>, std::numeric_limits<StreamNumber>::max() + 1> _stream_exists;
-  std::vector<std::weak_ptr<ScorpioUdpStream>> _streams_being_created;
-  uint16_t _next_stream_to_heartbeat;
   std::thread _processing_thread;
+  bool connected();
   std::shared_ptr<ScorpioUdpStream> get_stream(StreamNumber);
   void handle_new_packet(const MessageHeader& header, UdpData&& data);
   void pull_awaiting_streams(std::shared_ptr<scorpio_utils::network::ScorpioUdpStream> stream);
@@ -380,8 +380,6 @@ private:
   void send_or_panic(
     Code code, const std::vector<uint8_t>& data,
     std::string&& message = "Failed to send message in send");
-
-  std::mutex _close_mutex;
 
 public:
   SCU_ALWAYS_INLINE bool SCU_EAGER_SELECT_IS_READY() noexcept {
@@ -453,24 +451,27 @@ public:
 class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   friend class ScorpioUdpConnection;
   std::shared_ptr<TimeProvider> _time_provider;
-  std::unique_ptr<threading::Channel<std::shared_ptr<ScorpioUdpConnection>>> _new_connections;
-  threading::Channel<UdpData, 1024 * 16> _sender_channel;
-  threading::Channel<UdpData, 1024 * 16> _receiver_channel;
-  threading::Channel<std::weak_ptr<ScorpioUdpConnection>> _awaiting_connections_channel;
-#ifndef SCU_UDP_MOCK
+  #ifndef SCU_UDP_MOCK
   scorpio_utils::network::UdpSocket _socket;
-#else
+  #else
   scorpio_utils::network::UdpSocket& _socket;
-#endif
+  #endif
   std::atomic<size_t> _mock_sequence_number;
   std::atomic<bool> _auto_accept;
   std::atomic<bool> _stop;
-  std::mutex _panic_mutex;
   threading::Signal _start_signal;
   std::shared_ptr<logger::Logger> _logger;
 
   std::string _panic_message;
   std::atomic<bool> _panic;
+  std::unordered_map<std::pair<Ipv4, Port>, std::weak_ptr<ScorpioUdpConnection>> _connections;
+  std::mutex _panic_mutex;
+  std::recursive_mutex _threads_mutex;
+  std::unique_ptr<threading::Channel<std::shared_ptr<ScorpioUdpConnection>>> _new_connections;
+  threading::Channel<UdpData, 1024 * 16> _sender_channel;
+  threading::Channel<UdpData, 1024 * 16> _receiver_channel;
+  threading::Channel<std::weak_ptr<ScorpioUdpConnection>> _awaiting_connections_channel;
+  std::vector<std::thread> _threads;
   void panic(std::string&& message);
   bool send(
     std::optional<StreamNumber> stream_number,
@@ -493,7 +494,7 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
     const std::vector<uint8_t>& data,
     std::string&& panic_message = "Failed to send UDP packet");
 
-#ifdef SCU_UDP_MOCK
+#ifndef SCU_UDP_MOCK
   explicit
 #endif
   ScorpioUdp(
@@ -506,16 +507,12 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   void sender_thread();
   void receiver_thread();
 
-  std::unordered_map<std::pair<Ipv4, Port>, std::weak_ptr<ScorpioUdpConnection>> _connections;
   void processing_thread();
   void process_packet(UdpData udp_data);
   void handle_ping_packet(const MessageHeader& header, const UdpData& data);
   void handle_connect_packet(const MessageHeader& header, const UdpData& data);
   void pull_awaiting_connections(std::weak_ptr<ScorpioUdpConnection> connection_weak);
   std::shared_ptr<ScorpioUdpConnection> get_connection(Ipv4 remote_ip, Port remote_port);
-
-  std::recursive_mutex _threads_mutex;
-  std::vector<std::thread> _threads;
 
 public:
   SCU_ALWAYS_INLINE bool SCU_EAGER_SELECT_IS_READY() noexcept {

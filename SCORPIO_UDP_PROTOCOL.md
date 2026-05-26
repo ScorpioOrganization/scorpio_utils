@@ -326,7 +326,7 @@ Reliable streams use a **NACK-based retransmission** mechanism piggybacked onto 
 ```
 +----------+--------------+-------+------+-------+------+-------+
 |  cmd     | StreamNumber | count | end0 | beg1  | end1 | beg2  | ...
-|  1 B     |    2 B       |  1 B  |  2 B |  2 B  |  2 B |  2 B  |
+|  1 B     |    2 B       |  1 B  |  4 B |  4 B  |  4 B |  4 B  |
 +----------+--------------+-------+------+-------+------+-------+
 ```
 

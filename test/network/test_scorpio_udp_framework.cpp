@@ -519,19 +519,55 @@ public:
   ~AdvanceTimeEvent() override = default;
 };
 
-// Drains the send queue for `_max_attempts` ticks. If `_only_stream_data`
-// is true, periodic HEARTBEAT/CONNECT keep-alive packets are tolerated and
-// only STREAM_DATA-bearing packets cause failure. Otherwise any packet fails.
+// Drains the send queue for `_max_attempts` ticks. The filter argument selects
+// which command, if any, the caller cares about. ANY fails on any packet.
+// STREAM_DATA_ONLY ignores non-STREAM_DATA traffic (heartbeats etc.) and fails
+// only on STREAM_DATA. CREATE_STREAM_CREATE_ONLY likewise filters down to
+// CREATE_STREAM:CREATE subcommand packets, used to assert no retransmits of an
+// outgoing CREATE while a stream is in CREATING state.
 class ExpectNoPacket final : public EventInTime {
+public:
+  enum class Filter : uint8_t {
+    ANY,
+    STREAM_DATA_ONLY,
+    CREATE_STREAM_CREATE_ONLY,
+    CLOSE_STREAM_ONLY,
+  };
+
+private:
   const int64_t _period;
   const size_t _max_attempts;
-  const bool _only_stream_data;
+  const Filter _filter;
+
+  static bool packet_matches_filter(const std::vector<uint8_t>& data, Filter filter) noexcept {
+    switch (filter) {
+      case Filter::ANY:
+        return true;
+      case Filter::STREAM_DATA_ONLY: {
+          const auto command = static_cast<uint8_t>(data[0] & 0x0f);
+          return command == Code::STREAM_DATA;
+        }
+      case Filter::CREATE_STREAM_CREATE_ONLY: {
+          if (data.size() < 2) {
+            return false;
+          }
+          const auto command = static_cast<uint8_t>(data[0] & 0x0f);
+          return command == Code::CREATE_STREAM &&
+                 data[1] == static_cast<uint8_t>(Code::CreateStreamSubCommands::CREATE);
+        }
+      case Filter::CLOSE_STREAM_ONLY: {
+          const auto command = static_cast<uint8_t>(data[0] & 0x0f);
+          return command == Code::CLOSE_STREAM;
+        }
+    }
+    return false;
+  }
 
 public:
   explicit ExpectNoPacket(
     int64_t period = TICK_TIME, size_t max_attempts = 10,
-    bool only_stream_data = false)
-  : _period(period), _max_attempts(max_attempts), _only_stream_data(only_stream_data) { }
+    Filter filter = Filter::ANY)
+  : _period(period), _max_attempts(max_attempts), _filter(filter) { }
 
   Expected<Success, std::string> execute(
     int64_t,
@@ -545,11 +581,8 @@ public:
         if (SCU_UNLIKELY(data.empty())) {
           return Unexpected("Empty packet observed in send queue"s);
         }
-        if (_only_stream_data) {
-          const auto command = static_cast<uint8_t>(data[0] & 0x0f);
-          if (command != Code::STREAM_DATA) {
-            continue;  // ignore non-STREAM_DATA traffic (heartbeats etc.)
-          }
+        if (!packet_matches_filter(data, _filter)) {
+          continue;
         }
         return Unexpected("Unexpected packet observed in send queue: " + packet_to_string(data));
       }
@@ -560,7 +593,7 @@ public:
   }
   std::string name() override {
     return "ExpectNoPacket(period=" + std::to_string(_period) + "ns, attempts=" +
-           std::to_string(_max_attempts) + ", only_stream_data=" + std::to_string(_only_stream_data) + ")";
+           std::to_string(_max_attempts) + ", filter=" + std::to_string(static_cast<int>(_filter)) + ")";
   }
   ~ExpectNoPacket() override = default;
 };
@@ -1060,6 +1093,51 @@ public:
       new StreamIsActive(shared_from_this(), expect_active, period, max_attempts));
   }
 
+  class StreamIsAlive final : public EventInTime {
+    friend class StreamHandle;
+    const std::shared_ptr<StreamHandle> _handle;
+    const bool _expect_alive;
+    const int64_t _period;
+    const size_t _max_attempts;
+
+    StreamIsAlive(
+      std::shared_ptr<StreamHandle> handle, bool expect_alive,
+      int64_t period, size_t max_attempts)
+    : _handle(std::move(handle)), _expect_alive(expect_alive),
+      _period(period), _max_attempts(max_attempts) { }
+
+public:
+    Expected<Success, std::string> execute(
+      int64_t,
+      UdpSocket&,
+      std::shared_ptr<ScorpioUdp>
+    ) override {
+      SCU_ASSERT(_handle->_stream.has_value(), "Handle does not contain a stream");
+      const auto& stream = *(_handle->_stream);
+      const auto time_provider = get_time_provider();
+      for (size_t attempt = 0; attempt < _max_attempts; ++attempt) {
+        if (stream->is_alive() == _expect_alive) {
+          return Success();
+        }
+        time_provider->advance_time(_period);
+        std::this_thread::sleep_for(std::chrono::nanoseconds(_period));
+      }
+      return Unexpected("Stream is_alive expectation not met (expected: "s +
+        std::to_string(_expect_alive) + ", got: " + std::to_string(stream->is_alive()) +
+        ", state=" + std::to_string(static_cast<int>(stream->state())) + ")");
+    }
+    std::string name() override {
+      return "StreamIsAlive(expect_alive=" + std::to_string(_expect_alive) + ")";
+    }
+    ~StreamIsAlive() override = default;
+  };
+
+  std::unique_ptr<StreamIsAlive> stream_is_alive(
+    bool expect_alive = true, int64_t period = TICK_TIME, size_t max_attempts = 20) {
+    return std::unique_ptr<StreamIsAlive>(
+      new StreamIsAlive(shared_from_this(), expect_alive, period, max_attempts));
+  }
+
   class StreamIsPanic final : public EventInTime {
     friend class StreamHandle;
     const std::shared_ptr<StreamHandle> _handle;
@@ -1551,7 +1629,8 @@ TEST_F(ScorpioUdpTester, reliable_stream_heartbeat_no_gap_no_retransmission) {
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
     generate_single_packet(Code::HEARTBEAT, hb_body)) });
   // No STREAM_DATA should reappear (heartbeats are ignored by the filter).
-  events.push_back({ WHERE, 0, std::make_unique<ExpectNoPacket>(TICK_TIME, 10, /*only_stream_data=*/ true) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectNoPacket>(TICK_TIME, 10,
+    ExpectNoPacket::Filter::STREAM_DATA_ONLY) });
   close_connection(events);
   execute_test(events);
 }
@@ -1730,12 +1809,74 @@ TEST_F(ScorpioUdpTester, heartbeat_nonexistent_stream_sends_already_closed) {
   std::vector<uint8_t> hb_body;
   write_be16(hb_body, static_cast<uint16_t>(99));
   hb_body.push_back(0);  // ranges
-  write_be16(hb_body, 0);  // initial_end
+  write_be32(hb_body, 0);  // initial_end
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
     generate_single_packet(Code::HEARTBEAT, hb_body)) });
   events.push_back({ WHERE, 0, std::make_unique<ExpectPacketAnySeqTimeout>(Ipv4(127, 0, 0, 1), 12345,
     generate_single_packet(Code::CLOSE_STREAM,
       { AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED) }, 0, 99)) });
+  close_connection(events);
+  execute_test(events);
+}
+
+TEST_F(ScorpioUdpTester, heartbeat_nonexistent_stream_between_retransmit_streams) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+
+  // Streams 2 and 5 are active outgoing reliable streams; stream 99 is intentionally absent.
+  // Drain between creates to discard any CREATE_STREAM:CREATE retransmits for stream 2 that
+  // may be queued while stream_is_active polls (advancing time triggers heartbeat/update).
+  auto stream_a = create_outgoing_reliable_stream(events, connection_handle, 2, 16);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  auto stream_b = create_outgoing_reliable_stream(events, connection_handle, 5, 16);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+
+  std::vector<std::vector<uint8_t>> payloads_a;
+  std::vector<std::vector<uint8_t>> payloads_b;
+  for (SeqNumber i = 0; i < 3; ++i) {
+    payloads_a.push_back({ static_cast<uint8_t>(i * 2u), static_cast<uint8_t>(i * 2u + 1u) });
+    payloads_b.push_back({ static_cast<uint8_t>(0x80u | (i * 2u)), static_cast<uint8_t>(0x80u | (i * 2u + 1u)) });
+  }
+  for (const auto& p : payloads_a) {
+    events.push_back({ WHERE, 0, stream_a->stream_send(p) });
+  }
+  for (const auto& p : payloads_b) {
+    events.push_back({ WHERE, 0, stream_b->stream_send(p) });
+  }
+  for (SeqNumber seq = 0; seq < 3; ++seq) {
+    events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+      stream_data_packet(2, seq, payloads_a[seq])) });
+  }
+  for (SeqNumber seq = 0; seq < 3; ++seq) {
+    events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+      stream_data_packet(5, seq, payloads_b[seq])) });
+  }
+
+  // One heartbeat carries three stream entries:
+  // stream 2  : initial_end=1, held=[2,3) -> peer received seq 0 and seq 2 but missed seq 1
+  // stream 99 : nonexistent (0 ranges)    -> must elicit CLOSE_STREAM ALREADY_CLOSED
+  // stream 5  : initial_end=1, held=[2,3) -> same gap as stream 2, retransmit seq 1
+  // heartbeat_packet_handler processes entries in order, so responses arrive:
+  // retransmit stream 2 seq 1, CLOSE_STREAM for 99, retransmit stream 5 seq 1.
+  std::vector<uint8_t> hb_body;
+  const auto hb_a = generate_heartbeat_body(2, /*initial_end=*/ 1, /*held_ranges=*/ { { 2u, 3u } });
+  hb_body.insert(hb_body.end(), hb_a.begin(), hb_a.end());
+  write_be16(hb_body, static_cast<uint16_t>(99));
+  hb_body.push_back(0);
+  write_be32(hb_body, 0);
+  const auto hb_b = generate_heartbeat_body(5, /*initial_end=*/ 1, /*held_ranges=*/ { { 2u, 3u } });
+  hb_body.insert(hb_body.end(), hb_b.begin(), hb_b.end());
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::HEARTBEAT, hb_body)) });
+
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    stream_data_packet(2, 1, payloads_a[1])) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketAnySeqTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CLOSE_STREAM,
+      { AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED) }, 0, 99)) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    stream_data_packet(5, 1, payloads_b[1])) });
+
   close_connection(events);
   execute_test(events);
 }
@@ -1751,6 +1892,563 @@ TEST_F(ScorpioUdpTester, already_closed_response_closes_active_stream) {
     generate_single_packet(Code::CLOSE_STREAM,
       close_stream_payload(1, Code::CloseStreamSubCommands::ALREADY_CLOSED), 0, 1)) });
   events.push_back({ WHERE, 0, stream_handle->stream_is_active(false) });
+  close_connection(events);
+  execute_test(events);
+}
+
+// =====================================================================
+// Suite 8 — bug-hunt and additional coverage
+//
+// Tests in this suite either compromise a suspected bug in
+// src/network/scorpio_udp.cpp (those are EXPECTED to fail with the current
+// implementation and serve as living bug reports) or fill obvious coverage
+// gaps. See /home/igor/.claude/plans/try-to-find-bugs-composed-puffin.md
+// for the bug report.
+// =====================================================================
+
+// Compromises bug 1: handle_connect_packet's ALREADY_CONNECTED branch
+// (scorpio_udp.cpp:450-457) performs no state transition, so the
+// connection's processing_thread stays in its CONNECTING-retransmit loop
+// (scorpio_udp.cpp:1059-1064) forever. A correctly-fixed implementation
+// should treat peer's ALREADY_CONNECTED as confirmation and transition to
+// CONNECTED, after which the heartbeat loop starts emitting HEARTBEAT
+// packets. We assert that a HEARTBEAT is observed; with the bug present
+// no HEARTBEAT is ever sent and ExpectPacketTimeout will time out.
+TEST_F(ScorpioUdpTester, connect_handles_already_connected_response) {
+  auto connection_handle = ConnectionHandle::create();
+  std::vector<EventQueueItem> events;
+  events.push_back({ WHERE, 0, std::make_unique<StartScorpioUdp>() });
+  events.push_back({ WHERE, 0, connection_handle->create_connection(Ipv4(127, 0, 0, 1), 12345) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) })) });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::ALREADY_CONNECTED) })) });
+  // ExpectPacketTimeout silently drains the CONNECT retransmits via the
+  // is_background_packet filter, so this only succeeds if a HEARTBEAT is
+  // actually emitted (i.e., we reached State::CONNECTED).
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::HEARTBEAT, { }), TICK_TIME, 30) });
+  events.push_back({ WHERE, 0, connection_handle->close_connection(true) });
+  execute_test(events);
+}
+
+// Compromises bug 2: handle_connect_packet's CREATE_STREAM:REJECT handler
+// (scorpio_udp.cpp:832-866) never transitions the local stream out of
+// CREATING. As a result update() (scorpio_udp.cpp:1357-1366) keeps emitting
+// CREATE_STREAM:CREATE on every heartbeat tick until SCU_UDP_CREATE_RETRY_
+// PERIOD elapses (5 s simulated). A fix should transition to REJECTED or
+// ERROR immediately and stop retransmitting. We assert no CREATE_STREAM:
+// CREATE is observed after the REJECT response.
+TEST_F(ScorpioUdpTester, outgoing_stream_rejected_transitions_out_of_creating) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = StreamHandle::create(connection_handle);
+  const ScorpioUdpStream::StreamQoS qos{
+    16, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED };
+  events.push_back({ WHERE, 0, stream_handle->create_stream(1, qos) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+  generate_single_packet(Code::CREATE_STREAM,
+  create_stream_payload(1, qos, Code::CreateStreamSubCommands::CREATE))) });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+  generate_single_packet(Code::CREATE_STREAM,
+  create_stream_payload(1, qos, Code::CreateStreamSubCommands::REJECT))) });
+  // Wait for the stream to leave CREATING. is_alive() flips to false only when the
+  // REJECT handler has stored State::REJECTED; advancing time gives the connection's
+  // processing_thread ticks to drain _incoming_packets. stream_is_active(false) is
+  // unusable here because CREATING is already not "active".
+  events.push_back({ WHERE, 0, stream_handle->stream_is_alive(false) });
+  // Drop any CREATE retransmits that landed before the REJECT was processed (the
+  // tick-driven heartbeat can race with packet propagation through receiver_thread →
+  // _receiver_channel → _incoming_packets).
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  // After the state transition, no further CREATE_STREAM:CREATE retransmits may occur.
+  events.push_back({ WHERE, 0, std::make_unique<ExpectNoPacket>(TICK_TIME, 10,
+  ExpectNoPacket::Filter::CREATE_STREAM_CREATE_ONLY) });
+  close_connection(events);
+  execute_test(events);
+}
+
+// Coverage: symmetric to reliable_stream_send_fragmented_emits_multiple_
+// packets. Peer sends a multi-fragment reliable STREAM_DATA in order; the
+// orderer + partial_data path should reassemble (scorpio_udp.cpp:1395-1423).
+TEST_F(ScorpioUdpTester, reliable_stream_fragmented_receive_in_order) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = establish_incoming_reliable_stream(events, connection_handle, 1, 64);
+  std::vector<uint8_t> payload;
+  payload.reserve(1400);
+  for (size_t i = 0; i < 1400; ++i) {
+    payload.push_back(static_cast<uint8_t>(i & 0xff));
+  }
+  auto packets = generate_all_packets(Code::STREAM_DATA, payload, 0, 1);
+  ASSERT_GE(packets.size(), 3u) << "1400-byte reliable payload should fragment into >=3 packets";
+  for (auto& p : packets) {
+    events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345, p) });
+  }
+  events.push_back({ WHERE, 0, stream_handle->stream_receive(payload) });
+  close_connection(events);
+  execute_test(events);
+}
+
+// Coverage: same as above but fragments injected out of order. The orderer
+// at scorpio_udp.cpp:1399 should buffer until the missing seq arrives, then
+// drain in order via _orderer.next().
+TEST_F(ScorpioUdpTester, reliable_stream_fragmented_receive_out_of_order) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = establish_incoming_reliable_stream(events, connection_handle, 1, 64);
+  std::vector<uint8_t> payload;
+  payload.reserve(1400);
+  for (size_t i = 0; i < 1400; ++i) {
+    payload.push_back(static_cast<uint8_t>((i * 31 + 7) & 0xff));
+  }
+  auto packets = generate_all_packets(Code::STREAM_DATA, payload, 0, 1);
+  ASSERT_GE(packets.size(), 3u);
+  // Inject in order N-1, N-2, ..., 0 — reverse, fully out-of-order.
+  for (size_t i = packets.size(); i-- > 0; ) {
+    events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345, packets[i]) });
+  }
+  events.push_back({ WHERE, 0, stream_handle->stream_receive(payload) });
+  close_connection(events);
+  execute_test(events);
+}
+
+// Coverage: two fragmented messages back-to-back. partial_data must reset
+// between them; the panic guard at scorpio_udp.cpp:1410-1413 should not fire.
+TEST_F(ScorpioUdpTester, reliable_stream_two_consecutive_fragmented_messages) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = establish_incoming_reliable_stream(events, connection_handle, 1, 64);
+  std::vector<uint8_t> payload_a(1400, 0xAA);
+  std::vector<uint8_t> payload_b(1200, 0xBB);
+  auto packets_a = generate_all_packets(Code::STREAM_DATA, payload_a, 0, 1);
+  ASSERT_GT(packets_a.size(), 1u);
+  auto packets_b = generate_all_packets(
+    Code::STREAM_DATA, payload_b, static_cast<SeqNumber>(packets_a.size()), 1);
+  ASSERT_GT(packets_b.size(), 1u);
+  for (auto& p : packets_a) {
+    events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345, p) });
+  }
+  for (auto& p : packets_b) {
+    events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345, p) });
+  }
+  events.push_back({ WHERE, 0, stream_handle->stream_receive(payload_a) });
+  events.push_back({ WHERE, 0, stream_handle->stream_receive(payload_b) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_panic(false) });
+  close_connection(events);
+  execute_test(events);
+}
+
+// Coverage: orderer window enforcement. With depth=16 the orderer size is
+// 16 + SCU_UDP_QOS_DEPTH_SAFETY_BUFFER = 2064. A seq beyond that window
+// should trigger OrdererAddResult::TOO_NEW and panic the stream
+// (scorpio_udp.cpp:1399-1402).
+TEST_F(ScorpioUdpTester, reliable_stream_too_new_seq_panics_stream) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = establish_incoming_reliable_stream(events, connection_handle, 1, 16);
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    stream_data_packet(1, 3000, { 0x01, 0x02 })) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_panic(true) });
+  close_connection(events);
+  execute_test(events);
+}
+
+// Coverage: unreliable multi-fragment assembly with internally-inconsistent
+// frames_left. The check at scorpio_udp.cpp:1481-1487 panics when a
+// follow-on fragment's frames_left does not decrement by 1. We craft a
+// 3-fragment unreliable STREAM_DATA and mutate fragment[1]'s frames_left
+// from 1 to 2 (matching fragment[0]'s value) to trigger the panic.
+TEST_F(ScorpioUdpTester, unreliable_stream_inconsistent_frames_left_panics) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = establish_incoming_unreliable_stream(events, connection_handle, 2);
+  std::vector<uint8_t> payload(1400, 0x77);
+  auto packets = generate_all_packets(Code::STREAM_DATA, payload, 0, 2);
+  ASSERT_EQ(packets.size(), 3u);
+  // STREAM_DATA fragment wire layout: code(1) + stream_num(2) + seq(4) +
+  // frames_left(2) when NOT_LAST is set. frames_left lives at bytes [7,8].
+  ASSERT_GE(packets[1].size(), 9u);
+  packets[1][7] = 0x00;
+  packets[1][8] = 0x02;  // claim 2 frames left; orderer expects 1
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345, packets[0]) });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345, packets[1]) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_panic(true) });
+  close_connection(events);
+  execute_test(events);
+}
+
+// Coverage: ScorpioUdpStream::send guard at scorpio_udp.cpp:1252 rejects
+// any non-CLOSE_STREAM send once the stream has been locally closed.
+// We deliberately skip close_connection: while in CLOSING state, update()
+// (scorpio_udp.cpp:1372-1374) retransmits CLOSE_STREAM on every heartbeat,
+// and a clean DISCONNECT handshake would race those retransmits. TearDown
+// flushes everything via a big time advance + socket close.
+TEST_F(ScorpioUdpTester, stream_send_after_close_returns_false) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = establish_incoming_reliable_stream(events, connection_handle, 1, 16);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  events.push_back({ WHERE, 0, stream_handle->close_stream(true) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketAnySeqTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CLOSE_STREAM,
+      close_stream_payload(1, Code::CloseStreamSubCommands::CLOSE), 0, 1)) });
+  events.push_back({ WHERE, 0, stream_handle->stream_send({ 0x01, 0x02, 0x03 }, /*expect_success=*/ false) });
+  execute_test(events);
+}
+
+// Documents bug 4: heartbeat_packet_handler reads data[pos++] without
+// bounds-checking when a stream listed in the heartbeat is not known
+// locally (scorpio_udp.cpp:937-950). This test feeds a malformed heartbeat
+// body that ends mid-field; the connection should not panic. In practice
+// std::vector's allocator slack means the OOB read returns junk rather
+// than segfaulting, but the bug is real and should be fixed with an
+// explicit pos < data.size() check.
+TEST_F(ScorpioUdpTester, heartbeat_unknown_stream_truncated_does_not_crash) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  // Body is just a stream_number with no ranges/initial_end. Stream 99 is
+  // not known locally, so handler enters the "unknown stream" branch.
+  std::vector<uint8_t> body;
+  write_be16(body, static_cast<uint16_t>(99));
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::HEARTBEAT, body)) });
+  events.push_back({ WHERE, 0, connection_handle->connection_is_alive(true) });
+  events.push_back({ WHERE, 0, connection_handle->connection_is_panic(false) });
+  close_connection(events);
+  execute_test(events);
+}
+
+// Coverage: STREAM_DATA for a stream the connection has not created or
+// accepted is dropped with a warning (handle_new_packet:STREAM_DATA at
+// scorpio_udp.cpp:958-965); the connection itself must survive intact.
+TEST_F(ScorpioUdpTester, incoming_stream_data_before_create_is_dropped) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    stream_data_packet(7, 0, { 0x01, 0x02, 0x03 })) });
+  events.push_back({ WHERE, 0, connection_handle->connection_is_alive(true) });
+  events.push_back({ WHERE, 0, connection_handle->connection_is_panic(false) });
+  // We should not emit any STREAM_DATA in response.
+  events.push_back({ WHERE, 0, std::make_unique<ExpectNoPacket>(TICK_TIME, 5,
+    ExpectNoPacket::Filter::STREAM_DATA_ONLY) });
+  close_connection(events);
+  execute_test(events);
+}
+
+// Coverage: second peer CLOSE for the same stream id, after the stream has
+// already been closed by an earlier round-trip, must produce an
+// ALREADY_CLOSED response (close_stream_packet_handler CLOSE branch at
+// scorpio_udp.cpp:889-915).
+TEST_F(ScorpioUdpTester, peer_close_stream_idempotent_already_closed) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  events.push_back({ WHERE, 0, connection_handle->connection_auto_accept_streams(true) });
+  const ScorpioUdpStream::StreamQoS qos{
+    16, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED };
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CREATE_STREAM,
+      create_stream_payload(1, qos, Code::CreateStreamSubCommands::CREATE))) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CREATE_STREAM,
+      create_stream_payload(1, qos, Code::CreateStreamSubCommands::ACCEPT))) });
+  auto stream_handle = StreamHandle::create(connection_handle);
+  events.push_back({ WHERE, 0, stream_handle->get_stream(true) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_active(true) });
+  // First close round-trip.
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CLOSE_STREAM,
+      close_stream_payload(1, Code::CloseStreamSubCommands::CLOSE), 0, 1)) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketAnySeqTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CLOSE_STREAM,
+      close_stream_payload(1, Code::CloseStreamSubCommands::CLOSED), 0, 1)) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_active(false) });
+  // Second CLOSE for the same stream id — must be answered with ALREADY_CLOSED.
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CLOSE_STREAM,
+      close_stream_payload(1, Code::CloseStreamSubCommands::CLOSE), 0, 1)) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketAnySeqTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CLOSE_STREAM,
+      close_stream_payload(1, Code::CloseStreamSubCommands::ALREADY_CLOSED), 0, 1)) });
+  close_connection(events);
+  execute_test(events);
+}
+
+// Coverage: a bare HEARTBEAT (with no per-stream entries) updates
+// _last_received_packet_time (scorpio_udp.cpp:1006) and therefore staves
+// off the SCU_UDP_TIMEOUT panic the way an active peer is meant to.
+// Mirrors connection_panics_on_peer_silence which asserts the opposite
+// when no traffic arrives.
+TEST_F(ScorpioUdpTester, bare_heartbeat_keeps_connection_alive) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  // Move close to the timeout boundary, but stay under it.
+  events.push_back({ WHERE, 0, std::make_unique<AdvanceTimeEvent>(SCU_UDP_TIMEOUT * 4 / 5) });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::HEARTBEAT, { })) });
+  // Give the processing thread a tick to consume the heartbeat.
+  events.push_back({ WHERE, TICK_TIME, std::make_unique<NoOpEvent>() });
+  // Advance past where panic would have fired without the heartbeat reset.
+  events.push_back({ WHERE, 0, std::make_unique<AdvanceTimeEvent>(SCU_UDP_TIMEOUT * 4 / 5) });
+  events.push_back({ WHERE, 0, connection_handle->connection_is_panic(false) });
+  events.push_back({ WHERE, 0, connection_handle->connection_is_alive(true) });
+  close_connection(events);
+  execute_test(events);
+}
+
+// =====================================================================
+// Suite 9 - additional bug-hunt and coverage. See plan file
+// try-to-find-bugs-drifting-firefly.md (under ~/.claude/plans) for the
+// full bug report. Bug numbers below continue the numbering from Suite 8.
+// =====================================================================
+
+// Compromises bug 5: heartbeat_packet_handler at scorpio_udp.cpp:937-955
+// delegates per-stream-entry parsing to ScorpioUdpStream::handle_heartbeat_
+// data, but that function returns early without advancing `pos` when the
+// stream is unreliable (scorpio_udp.cpp:1589-1591). The outer loop then
+// reads the next stream_num from the middle of the unreliable entry's body
+// (range_count byte + first byte of initial_end) and emits CLOSE_STREAM
+// for whatever stream id those misaligned bytes decode to. With an all-
+// zero range body the spurious target is stream 0. A correctly-fixed
+// implementation must not emit a CLOSE_STREAM for any unrelated stream.
+TEST_F(ScorpioUdpTester, heartbeat_for_unreliable_stream_does_not_emit_spurious_close) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = establish_incoming_unreliable_stream(events, connection_handle, 5);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  auto hb_body = generate_heartbeat_body(5, /*initial_end=*/ 0, /*held_ranges=*/ { });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::HEARTBEAT, hb_body)) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectNoPacket>(TICK_TIME, 10,
+    ExpectNoPacket::Filter::CLOSE_STREAM_ONLY) });
+  close_connection(events);
+  execute_test(events);
+}
+
+// Compromises bug 5 in a multi-entry heartbeat. A reliable stream entry
+// with a single gap is followed by an unreliable stream entry. The
+// reliable retransmit (seq 1) is correct; after that, the parser is
+// misaligned and emits a CLOSE_STREAM for some stream id decoded from
+// the unreliable entry's body. No CLOSE_STREAM is acceptable.
+TEST_F(ScorpioUdpTester, heartbeat_mixed_reliable_unreliable_does_not_corrupt_parsing) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  events.push_back({ WHERE, 0, connection_handle->connection_auto_accept_streams(true) });
+  // Reliable outgoing stream id=1 so we own the _sent_history and respond
+  // to gap NACKs with STREAM_DATA retransmits.
+  auto reliable_stream = create_outgoing_reliable_stream(events, connection_handle, 1, 16);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  // Unreliable incoming stream id=5.
+  const ScorpioUdpStream::StreamQoS unreliable_qos{
+    0, ScorpioUdpStream::StreamQoS::Reliability::UNRELIABLE };
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CREATE_STREAM,
+      create_stream_payload(5, unreliable_qos, Code::CreateStreamSubCommands::CREATE))) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CREATE_STREAM,
+      create_stream_payload(5, unreliable_qos, Code::CreateStreamSubCommands::ACCEPT))) });
+  auto unreliable_stream = StreamHandle::create(connection_handle);
+  events.push_back({ WHERE, 0, unreliable_stream->get_stream(true) });
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  // Send three messages on the reliable stream so the sender has seq 0,1,2 in history.
+  std::vector<std::vector<uint8_t>> payloads = {
+    { 0x01, 0x01 }, { 0x02, 0x02 }, { 0x03, 0x03 },
+  };
+  for (auto& p : payloads) {
+    events.push_back({ WHERE, 0, reliable_stream->stream_send(p) });
+  }
+  for (SeqNumber seq = 0; seq < 3; ++seq) {
+    events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+      stream_data_packet(1, seq, payloads[seq])) });
+  }
+  // Peer heartbeat: stream 1 reliable (gap -> resend seq 1), then stream 5 unreliable (zero ranges).
+  std::vector<uint8_t> hb_body;
+  const auto hb_reliable = generate_heartbeat_body(1, /*initial_end=*/ 1, /*held_ranges=*/ { { 2u, 3u } });
+  hb_body.insert(hb_body.end(), hb_reliable.begin(), hb_reliable.end());
+  const auto hb_unreliable = generate_heartbeat_body(5, /*initial_end=*/ 0, /*held_ranges=*/ { });
+  hb_body.insert(hb_body.end(), hb_unreliable.begin(), hb_unreliable.end());
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::HEARTBEAT, hb_body)) });
+  // Sender must retransmit seq 1 on stream 1.
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    stream_data_packet(1, 1, payloads[1])) });
+  // No CLOSE_STREAM may follow.
+  events.push_back({ WHERE, 0, std::make_unique<ExpectNoPacket>(TICK_TIME, 10,
+    ExpectNoPacket::Filter::CLOSE_STREAM_ONLY) });
+  close_connection(events);
+  execute_test(events);
+}
+
+// Compromises bug 12: incoming CREATE_STREAM with an unsupported QoS
+// (UNRELIABLE_LATEST_ONLY or RELIABLE_UNORDERED) is silently accepted at
+// scorpio_udp.cpp:766-769 even though create_stream() asserts is_supported
+// for the outgoing path. A correctly-fixed implementation must respond
+// with REJECT for an unsupported reliability mode.
+TEST_F(ScorpioUdpTester, peer_unsupported_qos_create_stream_should_be_rejected) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  events.push_back({ WHERE, 0, connection_handle->connection_auto_accept_streams(true) });
+  const ScorpioUdpStream::StreamQoS unsupported_qos{
+    0, ScorpioUdpStream::StreamQoS::Reliability::UNRELIABLE_LATEST_ONLY };
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CREATE_STREAM,
+      create_stream_payload(3, unsupported_qos, Code::CreateStreamSubCommands::CREATE))) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CREATE_STREAM,
+      create_stream_payload(3, unsupported_qos, Code::CreateStreamSubCommands::REJECT))) });
+  close_connection(events);
+  execute_test(events);
+}
+
+// Coverage: DISCONNECT from an endpoint we have no connection for must
+// trigger an ALREADY_DISCONNECTED reply (scorpio_udp.cpp:498-502).
+TEST_F(ScorpioUdpTester, disconnect_to_unknown_peer_responds_already_disconnected) {
+  std::vector<EventQueueItem> events;
+  events.push_back({ WHERE, 0, std::make_unique<StartScorpioUdp>() });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::DISCONNECT, { AS_BYTE(Code::DisconnectSubCommands::DISCONNECT) })) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::DISCONNECT,
+      { AS_BYTE(Code::DisconnectSubCommands::ALREADY_DISCONNECTED) })) });
+  execute_test(events);
+}
+
+// Coverage: PING { PONG } from peer triggers a PING reply with payload
+// { 0x01 } per handle_ping_packet at scorpio_udp.cpp:380-382. Locks in
+// current intent since the spec does not formally describe PING flow.
+TEST_F(ScorpioUdpTester, peer_ping_pong_subcommand_triggers_ping_response) {
+  std::vector<EventQueueItem> events;
+  events.push_back({ WHERE, 0, std::make_unique<StartScorpioUdp>() });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::PING, { AS_BYTE(Code::PingSubCommands::PONG) })) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::PING, { AS_BYTE(Code::PingSubCommands::PONG) })) });
+  execute_test(events);
+}
+
+// Coverage: when peer answers our CREATE_STREAM with ALREADY_EXISTS the
+// stream must remain in CREATING (per protocol "stays CREATING
+// (idempotent)"). update() keeps retransmitting until SCU_UDP_CREATE_
+// RETRY_PERIOD elapses; we only verify the post-ALREADY_EXISTS state.
+TEST_F(ScorpioUdpTester, outgoing_stream_already_exists_response_keeps_stream_creating) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = StreamHandle::create(connection_handle);
+  const ScorpioUdpStream::StreamQoS qos{
+    16, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED };
+  events.push_back({ WHERE, 0, stream_handle->create_stream(1, qos) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CREATE_STREAM,
+      create_stream_payload(1, qos, Code::CreateStreamSubCommands::CREATE))) });
+  // ALREADY_EXISTS body per protocol carries only subcommand + stream_id.
+  std::vector<uint8_t> already_exists_payload;
+  already_exists_payload.push_back(AS_BYTE(Code::CreateStreamSubCommands::ALREADY_EXISTS));
+  write_be16(already_exists_payload, 1);
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CREATE_STREAM, already_exists_payload)) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_alive(true) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_active(false) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_panic(false) });
+  close_connection(events);
+  execute_test(events);
+}
+
+// Coverage: HEARTBEAT with two disjoint held ranges -> sender resends
+// both gaps. Exercises the range_count > 1 path of handle_heartbeat_
+// data at scorpio_udp.cpp:1614-1645.
+TEST_F(ScorpioUdpTester, reliable_stream_retransmit_multiple_gaps) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = create_outgoing_reliable_stream(events, connection_handle, 1, 16);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  // Send five messages: seqs 0..4.
+  std::vector<std::vector<uint8_t>> payloads = {
+    { 0x10 }, { 0x11 }, { 0x12 }, { 0x13 }, { 0x14 },
+  };
+  for (auto& p : payloads) {
+    events.push_back({ WHERE, 0, stream_handle->stream_send(p) });
+  }
+  for (SeqNumber seq = 0; seq < 5; ++seq) {
+    events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+      stream_data_packet(1, seq, payloads[seq])) });
+  }
+  // Peer received seq 0, 2, 4 (missing 1 and 3). Heartbeat carries
+  // initial_end=1, held=[(2,3),(4,5)].
+  auto hb_body = generate_heartbeat_body(1, /*initial_end=*/ 1,
+      /*held_ranges=*/ { { 2u, 3u }, { 4u, 5u } });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::HEARTBEAT, hb_body)) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    stream_data_packet(1, 1, payloads[1])) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    stream_data_packet(1, 3, payloads[3])) });
+  close_connection(events);
+  execute_test(events);
+}
+
+// Coverage: two concurrent unreliable streams must not cross-talk. Mirror
+// of two_reliable_streams_independent_data for UNRELIABLE QoS.
+TEST_F(ScorpioUdpTester, two_unreliable_streams_independent_data) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_a = establish_incoming_unreliable_stream(events, connection_handle, 1);
+  auto stream_b = establish_incoming_unreliable_stream(events, connection_handle, 2);
+  std::vector<uint8_t> payload_a{ 0xAA, 0xAA, 0xAA };
+  std::vector<uint8_t> payload_b{ 0xBB, 0xBB, 0xBB };
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    stream_data_packet(1, 0, payload_a)) });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    stream_data_packet(2, 0, payload_b)) });
+  events.push_back({ WHERE, 0, stream_a->stream_receive(payload_a) });
+  events.push_back({ WHERE, 0, stream_b->stream_receive(payload_b) });
+  events.push_back({ WHERE, 0, stream_a->stream_expect_no_receive() });
+  events.push_back({ WHERE, 0, stream_b->stream_expect_no_receive() });
+  close_connection(events);
+  execute_test(events);
+}
+
+// Coverage: after peer-initiated CLOSE the stream goes to CLOSED;
+// subsequent local send() must return false (is_active guard at
+// scorpio_udp.cpp:1257). Complements stream_send_after_close_returns_
+// false which tests the locally-initiated close path.
+TEST_F(ScorpioUdpTester, reliable_stream_send_after_peer_close_returns_false) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = establish_incoming_reliable_stream(events, connection_handle, 1, 16);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CLOSE_STREAM,
+      close_stream_payload(1, Code::CloseStreamSubCommands::CLOSE), 0, 1)) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketAnySeqTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CLOSE_STREAM,
+      close_stream_payload(1, Code::CloseStreamSubCommands::CLOSED), 0, 1)) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_active(false) });
+  events.push_back({ WHERE, 0, stream_handle->stream_send({ 0x01, 0x02, 0x03 },
+      /*expect_success=*/ false) });
+  close_connection(events);
+  execute_test(events);
+}
+
+// Coverage: a packet with an unknown command byte (low nibble = 9) is
+// processed by handle_new_packet's default arm at scorpio_udp.cpp:988-990
+// which logs and returns. Connection must remain alive and unpaniced and
+// nothing should be emitted in response.
+TEST_F(ScorpioUdpTester, unknown_command_byte_is_logged_and_ignored) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  // 0x49 = FIRST | command 9 (no such command).
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    std::vector<uint8_t>{ 0x49 }) });
+  events.push_back({ WHERE, 0, connection_handle->connection_is_alive(true) });
+  events.push_back({ WHERE, 0, connection_handle->connection_is_panic(false) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectNoPacket>(TICK_TIME, 5,
+    ExpectNoPacket::Filter::STREAM_DATA_ONLY) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectNoPacket>(TICK_TIME, 5,
+    ExpectNoPacket::Filter::CLOSE_STREAM_ONLY) });
   close_connection(events);
   execute_test(events);
 }
