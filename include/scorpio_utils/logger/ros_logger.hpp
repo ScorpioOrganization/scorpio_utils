@@ -15,7 +15,7 @@ public:
       case Level::ERROR:   RCLCPP_ERROR(_logger, "%s", message.c_str()); break;
       case Level::WARNING: RCLCPP_WARN (_logger, "%s", message.c_str()); break;
       case Level::INFO:    RCLCPP_INFO (_logger, "%s", message.c_str()); break;
-      case Level::DEBUG:
+      case Level::DEBUG:   RCLCPP_DEBUG(_logger, "%s", message.c_str()); break;
       case Level::TRACE:   RCLCPP_DEBUG(_logger, "%s", message.c_str()); break;
     }
   }
