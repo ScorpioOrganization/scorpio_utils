@@ -59,12 +59,12 @@ TEST(AndThen, BasicUsageVoid) {
   std::atomic<bool> map_called = false;
   std::atomic<bool> map_move_called = false;
 
-  future->and_map([&map_called]() {
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-      map_called.store(true, std::memory_order_relaxed);
+  auto future2 = future->and_map([&map_called]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        map_called.store(true, std::memory_order_relaxed);
   }, pool);
 
-  auto future2 = std::move(*future).and_map([&map_move_called]() {
+  auto future3 = std::move(*future).and_map([&map_move_called]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         map_move_called.store(true, std::memory_order_relaxed);
   }, pool);
@@ -77,6 +77,7 @@ TEST(AndThen, BasicUsageVoid) {
   EXPECT_TRUE(future->has_functions());
 
   future2->await();
+  future3->await();
 
   EXPECT_TRUE(future->is_done());
   EXPECT_TRUE(map_called);

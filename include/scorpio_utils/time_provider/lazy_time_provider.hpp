@@ -56,7 +56,7 @@ public:
    * Gets the current time offset in nanoseconds.
    * \return Time offset in nanoseconds.
    */
-  SCU_ALWAYS_INLINE auto get_time_offset() const {
+  SCU_ALWAYS_INLINE auto get_time_offset() const noexcept {
     return _time_offset.load(std::memory_order_relaxed);
   }
 
@@ -64,7 +64,7 @@ public:
    * Sets the time offset in nanoseconds.
    * \param offset Time offset in nanoseconds.
    */
-  SCU_ALWAYS_INLINE void set_time_offset(const int64_t offset) {
+  SCU_ALWAYS_INLINE void set_time_offset(const int64_t offset) noexcept {
     _time_offset.store(offset, std::memory_order_relaxed);
   }
 
@@ -72,7 +72,7 @@ public:
    * Gets the current time in nanoseconds.
    * \return Current time in nanoseconds.
    */
-  SCU_ALWAYS_INLINE int64_t get_time() override {
+  SCU_ALWAYS_INLINE int64_t get_time() const override {
     return _time.load(std::memory_order_relaxed);
   }
 };
