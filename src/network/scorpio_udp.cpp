@@ -940,7 +940,14 @@ void ScorpioUdpConnection::heartbeat_packet_handler(const MessageHeader& header,
       stream->handle_heartbeat_data(data.data, pos);
     } else {
       SCU_LOG_WARNING(_logger, "Received heartbeat data for non-existing stream number {}", stream_num);
-      if (SCU_UNLIKELY(!send(Code::CLOSE_STREAM, { AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED) }, stream_num,
+      std::vector<uint8_t> response;
+      response.reserve(3);
+      response.emplace_back(AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED));
+      size_t response_offset = 1;
+      response.resize(3);
+      SCU_DO_AND_ASSERT(host_to_network<StreamNumber>(stream_num, response, response_offset),
+        "Failed to convert stream number to network format for CLOSE_STREAM ALREADY_CLOSED response");
+      if (SCU_UNLIKELY(!send(Code::CLOSE_STREAM, std::move(response), stream_num,
         _sequence_number))) {
         panic("Failed to send CLOSE_STREAM ALREADY_CLOSED response for non-existing stream");
       }

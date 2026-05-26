@@ -1812,9 +1812,12 @@ TEST_F(ScorpioUdpTester, heartbeat_nonexistent_stream_sends_already_closed) {
   write_be32(hb_body, 0);  // initial_end
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
     generate_single_packet(Code::HEARTBEAT, hb_body)) });
+  std::vector<uint8_t> close_body;
+  close_body.reserve(3);
+  close_body.emplace_back(AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED));
+  write_be16(close_body, static_cast<uint16_t>(99));
   events.push_back({ WHERE, 0, std::make_unique<ExpectPacketAnySeqTimeout>(Ipv4(127, 0, 0, 1), 12345,
-    generate_single_packet(Code::CLOSE_STREAM,
-      { AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED) }, 0, 99)) });
+    generate_single_packet(Code::CLOSE_STREAM, close_body, 0, 99)) });
   close_connection(events);
   execute_test(events);
 }
@@ -1871,9 +1874,12 @@ TEST_F(ScorpioUdpTester, heartbeat_nonexistent_stream_between_retransmit_streams
 
   events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
     stream_data_packet(2, 1, payloads_a[1])) });
+  std::vector<uint8_t> close_body;
+  close_body.reserve(3);
+  close_body.emplace_back(AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED));
+  write_be16(close_body, static_cast<uint16_t>(99));
   events.push_back({ WHERE, 0, std::make_unique<ExpectPacketAnySeqTimeout>(Ipv4(127, 0, 0, 1), 12345,
-    generate_single_packet(Code::CLOSE_STREAM,
-      { AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED) }, 0, 99)) });
+    generate_single_packet(Code::CLOSE_STREAM, close_body, 0, 99)) });
   events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
     stream_data_packet(5, 1, payloads_b[1])) });
 
