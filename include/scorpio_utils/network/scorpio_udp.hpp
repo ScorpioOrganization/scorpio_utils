@@ -215,6 +215,9 @@ public:
     SCU_ALWAYS_INLINE constexpr bool is_supported() const noexcept {
       return reliability != Reliability::UNRELIABLE_LATEST_ONLY && reliability != Reliability::RELIABLE_UNORDERED;
     }
+    SCU_ALWAYS_INLINE constexpr bool is_ordered() const noexcept {
+      return reliability == Reliability::RELIABLE_ORDERED;
+    }
   };
 
 private:

@@ -19,6 +19,10 @@ else()
     add_definitions(-DARCH_UNKNOWN)
 endif()
 
+if(DOCKER_BUILD)
+  add_definitions(-DDOCKER_BUILD)
+endif()
+
 add_compile_options(-std=c++17 -Wall -Wextra -Wpedantic -pedantic-errors -Wdeprecated
   -Wc++17-compat -Wconversion -Wsign-conversion -Wpessimizing-move -Werror
   # -flto=auto
