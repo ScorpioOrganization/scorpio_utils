@@ -25,10 +25,10 @@ endif()
 
 add_compile_options(-std=c++17 -Wall -Wextra -Wpedantic -pedantic-errors -Wdeprecated
   -Wc++17-compat -Wconversion -Wsign-conversion -Wpessimizing-move -Werror
-  # -flto=auto
+  -flto=auto
 )
 
-# add_link_options(-flto=auto)
+add_link_options(-flto=auto)
 
 include_directories(
   include/
