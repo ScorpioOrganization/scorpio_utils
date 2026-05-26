@@ -17,6 +17,7 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include "scorpio_utils/decorators.hpp"
 #include "scorpio_utils/expected.hpp"
 #include "scorpio_utils/logger/logger.hpp"
 #include "scorpio_utils/network/orderer.hpp"
@@ -214,6 +215,9 @@ public:
     }
     SCU_ALWAYS_INLINE constexpr bool is_supported() const noexcept {
       return reliability != Reliability::UNRELIABLE_LATEST_ONLY && reliability != Reliability::RELIABLE_UNORDERED;
+    }
+    SCU_ALWAYS_INLINE constexpr bool is_ordered() const noexcept {
+      return reliability == Reliability::RELIABLE_ORDERED;
     }
   };
 
