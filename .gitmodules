@@ -1,0 +1,3 @@
+[submodule "itertools"]
+	path = itertools
+	url = https://github.com/igorosky/itertools.git

@@ -17,7 +17,6 @@
 #include <utility>
 #include <variant>
 #include <vector>
-#include "scorpio_utils/decorators.hpp"
 #include "scorpio_utils/expected.hpp"
 #include "scorpio_utils/logger/logger.hpp"
 #include "scorpio_utils/network/orderer.hpp"

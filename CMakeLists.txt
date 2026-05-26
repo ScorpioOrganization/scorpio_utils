@@ -1,10 +1,6 @@
 cmake_minimum_required(VERSION 3.8)
 project(scorpio_utils)
 
-if(DOCKER_BUILD)
-  add_definitions(-DDOCKER_BUILD)
-endif()
-
 find_package(ament_cmake REQUIRED)
 find_package(backward_ros REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -21,6 +17,10 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" OR CMAKE_SYSTEM_PROCESSOR MATCHE
 else()
     message(WARNING "Unknown architecture: ${CMAKE_SYSTEM_PROCESSOR}")
     add_definitions(-DARCH_UNKNOWN)
+endif()
+
+if(DOCKER_BUILD)
+  add_definitions(-DDOCKER_BUILD)
 endif()
 
 add_compile_options(-std=c++17 -Wall -Wextra -Wpedantic -pedantic-errors -Wdeprecated
