@@ -32,6 +32,7 @@ add_link_options(-flto=auto)
 
 include_directories(
   include/
+  itertools/include/
 )
 
 add_library(threading SHARED
@@ -101,6 +102,7 @@ install(TARGETS
 
 install(DIRECTORY
   include/
+  itertools/include/
   DESTINATION include
 )
 
@@ -272,5 +274,5 @@ if(BUILD_TESTING)
   )
 endif()
 
-ament_export_include_directories(include)
+ament_export_include_directories(include itertools/include)
 ament_package()
