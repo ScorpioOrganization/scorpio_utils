@@ -21,6 +21,7 @@
 #include <stddef.h>
 #include <algorithm>
 #include <cstdint>
+#include <vector>
 
 namespace scorpio_utils {
 __attribute__((noinline))
