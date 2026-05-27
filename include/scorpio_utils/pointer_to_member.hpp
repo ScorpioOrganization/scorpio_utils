@@ -39,7 +39,27 @@ struct NamedPointerToMember {
   static constexpr Y T::* ptr = Ptr;
   static constexpr const char* name = Name;
 };
+
+/**
+ * A utility structure to create a pointer to member.
+ * This is useful for reflection or serialization purposes.
+ *
+ * \tparam T The type of the class containing the member.
+ * \tparam Y The type of the member.
+ * \tparam Ptr The pointer to member.
+ */
+template<typename T, typename Y, Y T::* Ptr>
+struct PointerToMember {
+  static_assert(Ptr != nullptr, "Pointer to member cannot be null");
+  static_assert(std::is_member_object_pointer_v<Y T::*>, "Ptr must be a member object pointer");
+  using type = T;
+  using field_type = Y;
+  static constexpr Y T::* ptr = Ptr;
+};
 }  // namespace scorpio_utils
 
 #define SCU_CREATE_NAMED_POINTER_TO_MEMBER(Type, Field, NAME_ALIAS) \
   scorpio_utils::NamedPointerToMember<Type, decltype(Type::Field), &Type::Field, NAME_ALIAS>
+
+#define SCU_CREATE_POINTER_TO_MEMBER(Type, Field) \
+  scorpio_utils::PointerToMember<Type, decltype(Type::Field), &Type::Field>
