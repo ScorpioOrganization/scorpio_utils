@@ -10,7 +10,7 @@ namespace scorpio_utils::logger {
 class ROSLogger : public Logger {
 public:
   explicit ROSLogger(rclcpp::Logger logger)
-  : _logger(std::move(logger)) {}
+  : _logger(std::move(logger)) { }
 
   void log(Level level, std::string&& message) override {
     switch (level) {
