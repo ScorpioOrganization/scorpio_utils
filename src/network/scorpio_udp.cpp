@@ -431,6 +431,8 @@ void ScorpioUdp::handle_connect_packet(const MessageHeader& header, const UdpDat
           SCU_LOG_ERROR(_logger, "Received ACCEPTED for non-existing connection ip: {}, port: {}",
           udp_data.ip.str(), udp_data.port);
           // TODO(@Igor): Handle error properly
+          send_or_panic(std::nullopt, _mock_sequence_number, Code::ERROR, udp_data.ip, udp_data.port,
+            { }, "Failed to send ERROR response for ACCEPTED subcommand for non-existing connection");
         } else if (!connection->connected()) {
           SCU_LOG_ERROR(_logger, "Received ACCEPTED for connection not in CONNECTING state. ip: {}, port: {}",
             udp_data.ip.str(), udp_data.port);
@@ -986,6 +988,7 @@ SCU_HOT void ScorpioUdpConnection::handle_new_packet(const MessageHeader& header
       } break;
     case Code::ERROR: {
         // SCU_UNIMPLEMENTED();
+        panic("Received ERROR packet from peer");
       } break;
     case Code::HEARTBEAT: {
         heartbeat_packet_handler(header, std::move(data));
