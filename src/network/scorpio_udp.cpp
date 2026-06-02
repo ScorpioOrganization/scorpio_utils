@@ -513,7 +513,7 @@ SCU_HOT void ScorpioUdp::process_packet(UdpData udp_data) {
           // Received connection-oriented packet for non-existing connection
           SCU_LOG_ERROR(_logger,
             "Received packet for non-existing connection from {}:{}. Command: {}",
-            udp_data.ip.str(), udp_data.port, SCU_AS(int, header.command));
+            udp_data.ip.str(), udp_data.port, SCU_AS(Code, header.command));
           // SCU_UNIMPLEMENTED();  // This is harmless so, just ignore it for now
         }
       } break;
