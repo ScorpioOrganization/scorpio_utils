@@ -444,6 +444,7 @@ void ScorpioUdp::handle_connect_packet(const MessageHeader& header, const UdpDat
           SCU_LOG_ERROR(_logger, "Received REJECTED for non-existing connection ip: {}, port: {}",
             udp_data.ip.str(), udp_data.port);
         } else {
+          SCU_LOG_INFO(_logger, "Connection rejected by {}:{}", udp_data.ip.str(), udp_data.port);
           connection->_state = ScorpioUdpConnection::State::REJECTED;
         }
       } break;
@@ -865,6 +866,7 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
             stream->qos().depth, qos_opt->depth);
           return;
         }
+        SCU_LOG_INFO(_logger, "Stream number {} was rejected by peer", stream_number);
         stream->_state.store(ScorpioUdpStream::State::REJECTED, std::memory_order_relaxed);
       } break;
   }
@@ -1169,6 +1171,7 @@ bool ScorpioUdpConnection::close() {
       stream->close();
     }
   }
+  SCU_LOG_INFO(_logger, "Closing connection {}:{}", _remote_ip.str(), _remote_port);
   send(Code::DISCONNECT, { AS_BYTE(Code::DisconnectSubCommands::DISCONNECT) },
     std::nullopt, std::nullopt);
   _stop.store(true, std::memory_order_relaxed);
