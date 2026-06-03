@@ -818,7 +818,7 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
           SCU_LOG_ERROR(_logger,
                         "Received ACCEPT for stream number {} with different QoS. "
                         "Expected reliability: {}, got: {}. Expected depth: {}, got: {}",
-            stream_number, SCU_AS(int, stream->qos().reliability), SCU_AS(int, qos_opt->reliability),
+            stream_number, stream->qos().reliability, qos_opt->reliability,
             stream->qos().depth, qos_opt->depth);
           return;
         }
@@ -864,7 +864,7 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
           SCU_LOG_ERROR(_logger,
                         "Received REJECT for stream number {} with different QoS. "
                         "Expected reliability: {}, got: {}. Expected depth: {}, got: {}",
-            stream_number, SCU_AS(int, stream->qos().reliability), SCU_AS(int, qos_opt->reliability),
+            stream_number, stream->qos().reliability, qos_opt->reliability,
             stream->qos().depth, qos_opt->depth);
           return;
         }
