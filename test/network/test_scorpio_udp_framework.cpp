@@ -1272,6 +1272,39 @@ TEST_F(ScorpioUdpTester, connect_and_get_closed) {
   execute_test(events);
 }
 
+TEST_F(ScorpioUdpTester, reconnect_same_address_before_disconnect_accept) {
+  std::vector<EventQueueItem> events;
+  const Ipv4 peer(127, 0, 0, 1);
+  const Port port = 12345;
+
+  // conn1: outgoing connect + handshake (helper uses the same 127.0.0.1:12345).
+  auto conn1 = create_connection(events);
+
+  // Quick local disconnect. close() emits DISCONNECT/DISCONNECT; drain it so the
+  // later CONNECT expectation does not trip over it.
+  events.push_back({ WHERE, 0, conn1->close_connection(true) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(peer, port,
+  generate_single_packet(Code::DISCONNECT, { AS_BYTE(Code::DisconnectSubCommands::DISCONNECT) })) });
+
+  // Reconnect to the SAME ip:port before the peer's DISCONNECT ACCEPT is delivered.
+  auto conn2 = ConnectionHandle::create();
+  events.push_back({ WHERE, 0, conn2->create_connection(peer, port) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(peer, port,
+  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) })) });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(peer, port,
+  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::ACCEPTED) })) });
+  events.push_back({ WHERE, 0, conn2->connection_is_alive(true) });
+  events.push_back({ WHERE, 0, conn1->connection_is_alive(false) });
+
+  // The late DISCONNECT ACCEPT for the old connection finally arrives. It must be
+  // ignored and must not disturb the new connection.
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(peer, port,
+  generate_single_packet(Code::DISCONNECT, { AS_BYTE(Code::DisconnectSubCommands::ACCEPTED) })) });
+  events.push_back({ WHERE, 0, conn2->connection_is_alive(true) });
+
+  execute_test(events);
+}
+
 TEST_F(ScorpioUdpTester, accept_connection_and_close) {
   std::shared_ptr<ConnectionHandle> connection_handle = ConnectionHandle::create();
   std::vector<EventQueueItem> events;

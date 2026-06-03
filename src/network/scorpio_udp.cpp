@@ -473,6 +473,42 @@ void ScorpioUdp::handle_connect_packet(const MessageHeader& header, const UdpDat
   }
 }
 
+void ScorpioUdp::handle_disconnect_packet(const MessageHeader& header, const UdpData& udp_data) {
+  if (udp_data.data.size() - header.data_offset != 1) {
+    // TODO(@Igor): Handle error properly
+    SCU_LOG_ERROR(_logger,
+      "Invalid DISCONNECT packet size: expected 1 byte for subcommand, got {}",
+      udp_data.data.size() - header.data_offset);
+    return;
+  }
+  SCU_LOG_TRACE(_logger, "Handling DISCONNECT packet from {}:{}. Subcommand: {}",
+    udp_data.ip.str(), udp_data.port, SCU_AS(Code::DisconnectSubCommands, udp_data.data[header.data_offset]));
+  switch (SCU_AS(Code::DisconnectSubCommands, udp_data.data[header.data_offset])) {
+    case Code::DisconnectSubCommands::DISCONNECT: {
+        if (auto connection_opt = get_connection(udp_data.ip, udp_data.port);
+          connection_opt != nullptr && connection_opt->is_alive()) {
+          send_or_panic(std::nullopt, _mock_sequence_number, Code::DISCONNECT,
+          udp_data.ip, udp_data.port,
+            { AS_BYTE(Code::DisconnectSubCommands::ACCEPTED) },
+          "Failed to send DISCONNECT ACCEPTED response");
+          connection_opt->close(false);
+        } else {
+          // Handle disconnect for non-existing connection
+          send_or_panic(std::nullopt, _mock_sequence_number, Code::DISCONNECT,
+          udp_data.ip, udp_data.port,
+            { AS_BYTE(Code::DisconnectSubCommands::ALREADY_DISCONNECTED) },
+          "Failed to send DISCONNECT ACCEPTED response for non-existing connection");
+        }
+      } break;
+    default: {
+        // TODO(@Igor): Handle error properly
+        SCU_LOG_WARNING(_logger, "Received unknown/unexpected DISCONNECT subcommand: {} from {}:{}",
+  udp_data.data[header.data_offset],
+  udp_data.ip.str(), udp_data.port);
+      } break;
+  }
+}
+
 SCU_HOT void ScorpioUdp::process_packet(UdpData udp_data) {
   auto header_opt = parse_header(udp_data.data);
   if (SCU_UNLIKELY(header_opt.is_err())) {
@@ -490,20 +526,7 @@ SCU_HOT void ScorpioUdp::process_packet(UdpData udp_data) {
         handle_connect_packet(header, udp_data);
       } break;
     case Code::DISCONNECT: {
-        if (auto connection_opt = get_connection(udp_data.ip, udp_data.port);
-          connection_opt != nullptr && connection_opt->is_alive()) {
-          send_or_panic(std::nullopt, _mock_sequence_number, Code::DISCONNECT,
-            udp_data.ip, udp_data.port,
-            { AS_BYTE(Code::DisconnectSubCommands::ACCEPTED) },
-            "Failed to send DISCONNECT ACCEPTED response");
-          connection_opt->close();
-        } else {
-          // Handle disconnect for non-existing connection
-          send_or_panic(std::nullopt, _mock_sequence_number, Code::DISCONNECT,
-            udp_data.ip, udp_data.port,
-            { AS_BYTE(Code::DisconnectSubCommands::ALREADY_DISCONNECTED) },
-            "Failed to send DISCONNECT ACCEPTED response for non-existing connection");
-        }
+        handle_disconnect_packet(header, udp_data);
       } break;
     default: {
         if (auto connection_opt = get_connection(udp_data.ip, udp_data.port);
@@ -1161,7 +1184,7 @@ void ScorpioUdpConnection::send_or_panic(
   }
 }
 
-bool ScorpioUdpConnection::close() {
+bool ScorpioUdpConnection::close(bool send_disconnect) {
   std::unique_lock<std::mutex> lock(_close_mutex, std::try_to_lock);
   if (!lock.owns_lock()) {
     // Another thread is already closing the connection
@@ -1175,8 +1198,10 @@ bool ScorpioUdpConnection::close() {
     }
   }
   SCU_LOG_INFO(_logger, "Closing connection {}:{}", _remote_ip.str(), _remote_port);
-  send(Code::DISCONNECT, { AS_BYTE(Code::DisconnectSubCommands::DISCONNECT) },
-    std::nullopt, std::nullopt);
+  if (send_disconnect) {
+    send(Code::DISCONNECT, { AS_BYTE(Code::DisconnectSubCommands::DISCONNECT) },
+      std::nullopt, std::nullopt);
+  }
   _stop.store(true, std::memory_order_relaxed);
   _state.store(State::CLOSED, std::memory_order_relaxed);
   _new_streams.close();

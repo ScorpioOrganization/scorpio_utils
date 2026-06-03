@@ -384,6 +384,8 @@ private:
     Code code, const std::vector<uint8_t>& data,
     std::string&& message = "Failed to send message in send");
 
+  bool close(bool send_disconnect_packet);
+
 public:
   SCU_ALWAYS_INLINE bool SCU_EAGER_SELECT_IS_READY() noexcept {
     return _awaiting_streams.SCU_EAGER_SELECT_IS_READY();
@@ -399,7 +401,9 @@ public:
     }
   }
 
-  bool close();
+  SCU_ALWAYS_INLINE bool close() {
+    return close(true);
+  }
 
   [[nodiscard]] std::shared_ptr<ScorpioUdpStream> create_stream(
     StreamNumber stream_id,
@@ -514,6 +518,7 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   void process_packet(UdpData udp_data);
   void handle_ping_packet(const MessageHeader& header, const UdpData& data);
   void handle_connect_packet(const MessageHeader& header, const UdpData& data);
+  void handle_disconnect_packet(const MessageHeader& header, const UdpData& data);
   void pull_awaiting_connections(std::weak_ptr<ScorpioUdpConnection> connection_weak);
   std::shared_ptr<ScorpioUdpConnection> get_connection(Ipv4 remote_ip, Port remote_port);
 
