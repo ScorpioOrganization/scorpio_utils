@@ -61,10 +61,12 @@ auto get_client_server_connection(scorpio_utils::network::Port port) {
 }
 
 TEST(ScorpioUdp, BasicSend) {
+  auto sender_logger = std::make_shared<scorpio_utils::logger::OSLogger<std::ofstream>>("sender_log_basic.txt");
+  auto receiver_logger = std::make_shared<scorpio_utils::logger::OSLogger<std::ofstream>>("receiver_log_basic.txt");
   const auto port = PORT;
   std::atomic<bool> server_ready(false);
-  std::thread server([&server_ready, port]() {
-      auto socket = ScorpioUdp::create();
+  std::thread server([&server_ready, port, receiver_logger]() {
+      auto socket = ScorpioUdp::create(std::move(receiver_logger));
       ASSERT_TRUE(socket->start());
       std::ignore = socket->set_auto_accept(true);
       ASSERT_TRUE(socket->listen(localhost, port));
@@ -84,7 +86,7 @@ TEST(ScorpioUdp, BasicSend) {
       EXPECT_EQ(data.value(), (std::vector<uint8_t>{ 'H', 'e', 'l', 'l', 'o', ' ', 'W', 'o', 'r', 'l', 'd', '!' }));
       std::this_thread::sleep_for(std::chrono::seconds(5));
     });
-  const auto socket = ScorpioUdp::create();
+  const auto socket = ScorpioUdp::create(sender_logger);
   ASSERT_TRUE(socket->start());
   while (!server_ready.load(std::memory_order_relaxed)) {
     std::this_thread::yield();

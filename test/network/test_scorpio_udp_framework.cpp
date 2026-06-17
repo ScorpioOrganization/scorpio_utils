@@ -336,9 +336,9 @@ static bool is_background_packet(
     return false;
   }
   if (command == Code::CONNECT &&
-    packet[1] == static_cast<uint8_t>(Code::ConnectionSubCommands::CONNECT) &&
+    packet[1] == static_cast<uint8_t>(Code::ConnectSubCommands::CONNECT) &&
     !(expected_command == Code::CONNECT && expected.size() >= 2 &&
-    expected[1] == static_cast<uint8_t>(Code::ConnectionSubCommands::CONNECT))) {
+    expected[1] == static_cast<uint8_t>(Code::ConnectSubCommands::CONNECT))) {
     return true;
   }
   if (command == Code::CREATE_STREAM &&
@@ -1250,9 +1250,9 @@ auto create_connection(std::vector<EventQueueItem>& events) {
   events.push_back({ WHERE, 0, std::make_unique<StartScorpioUdp>() });
   events.push_back({ WHERE, 0, connection_handle->create_connection(Ipv4(127, 0, 0, 1), 12345) });
   events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
-  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) })) });
+  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectSubCommands::CONNECT) })) });
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
-  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::ACCEPTED) })) });
+  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectSubCommands::ACCEPTED) })) });
   events.push_back({ WHERE, 0, connection_handle->connection_is_alive(true) });
   return connection_handle;
 }
@@ -1290,9 +1290,9 @@ TEST_F(ScorpioUdpTester, reconnect_same_address_before_disconnect_accept) {
   auto conn2 = ConnectionHandle::create();
   events.push_back({ WHERE, 0, conn2->create_connection(peer, port) });
   events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(peer, port,
-  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) })) });
+  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectSubCommands::CONNECT) })) });
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(peer, port,
-  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::ACCEPTED) })) });
+  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectSubCommands::ACCEPTED) })) });
   events.push_back({ WHERE, 0, conn2->connection_is_alive(true) });
   events.push_back({ WHERE, 0, conn1->connection_is_alive(false) });
 
@@ -1312,9 +1312,9 @@ TEST_F(ScorpioUdpTester, accept_connection_and_close) {
   events.push_back({ WHERE, 0, std::make_unique<StartListening>(Ipv4(127, 0, 0, 1), 10001) });
   events.push_back({ WHERE, 0, std::make_unique<SetAutoAccept>(true) });
   events.push_back({ WHERE, TICK_TIME, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
-  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) })) });
+  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectSubCommands::CONNECT) })) });
   events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
-  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::ACCEPTED) })) });
+  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectSubCommands::ACCEPTED) })) });
   events.push_back({ WHERE, 0, connection_handle->get_connection(true) });
   events.push_back({ WHERE, 0, connection_handle->connection_is_alive(true) });
   events.push_back({ WHERE, 0, connection_handle->close_connection(true) });
@@ -1330,9 +1330,9 @@ TEST_F(ScorpioUdpTester, reject_connection) {
   events.push_back({ WHERE, 0, std::make_unique<StartListening>(Ipv4(127, 0, 0, 1), 10001) });
   events.push_back({ WHERE, 0, std::make_unique<SetAutoAccept>(false) });
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
-  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) })) });
+  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectSubCommands::CONNECT) })) });
   events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
-  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::REJECTED) })) });
+  generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectSubCommands::REJECTED) })) });
   execute_test(events);
 }
 
@@ -1359,9 +1359,9 @@ TEST_F(ScorpioUdpTester, connect_rejected_by_peer) {
   events.push_back({ WHERE, 0, std::make_unique<StartScorpioUdp>() });
   events.push_back({ WHERE, 0, connection_handle->create_connection(Ipv4(127, 0, 0, 1), 12345) });
   events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
-    generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) })) });
+    generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectSubCommands::CONNECT) })) });
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
-    generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::REJECTED) })) });
+    generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectSubCommands::REJECTED) })) });
   events.push_back({ WHERE, 0, connection_handle->connection_is_alive(false) });
   // Explicit local close synchronously joins the connection's processing thread
   // before the test ends, avoiding a race in scorpio_udp.cpp:1104 where the
@@ -1959,9 +1959,9 @@ TEST_F(ScorpioUdpTester, connect_handles_already_connected_response) {
   events.push_back({ WHERE, 0, std::make_unique<StartScorpioUdp>() });
   events.push_back({ WHERE, 0, connection_handle->create_connection(Ipv4(127, 0, 0, 1), 12345) });
   events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
-    generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) })) });
+    generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectSubCommands::CONNECT) })) });
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
-    generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::ALREADY_CONNECTED) })) });
+    generate_single_packet(Code::CONNECT, { AS_BYTE(Code::ConnectSubCommands::ALREADY_CONNECTED) })) });
   // ExpectPacketTimeout silently drains the CONNECT retransmits via the
   // is_background_packet filter, so this only succeeds if a HEARTBEAT is
   // actually emitted (i.e., we reached State::CONNECTED).

@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <set>
 #include <string>
 #include <string_view>
@@ -57,6 +58,7 @@ using SeqNumber = uint32_t;
 using SeqNumberComplement = uint32_t;
 using StreamNumber = uint16_t;
 using FramesLeft = uint16_t;
+using ConnectionId = uint64_t;
 
 #ifdef SCU_UDP_MOCK
 using TimeProvider = scorpio_utils::testing::MockTimeProvider;
@@ -96,7 +98,7 @@ struct Code {
     PONG,
   };
 
-  enum class ConnectionSubCommands : uint8_t {
+  enum class ConnectSubCommands : uint8_t {
     CONNECT,
     ACCEPTED,
     REJECTED,
@@ -337,6 +339,7 @@ private:
   friend class ScorpioUdpStream;
   const Ipv4 _remote_ip;
   const Port _remote_port;
+  const ConnectionId _connection_id;
   std::atomic<size_t> _sequence_number;
   std::atomic<bool> _panic;
   std::atomic<State> _state;
@@ -371,8 +374,11 @@ private:
   void send_heartbeat();
   void processing_thread();
 
-  ScorpioUdpConnection(Ipv4 remote_ip, Port remote_port, std::shared_ptr<ScorpioUdp> parent);
+  ScorpioUdpConnection(
+    Ipv4 remote_ip, Port remote_port, ConnectionId connection_id,
+    std::shared_ptr<ScorpioUdp> parent);
   void panic(std::string&& message);
+  void panic_soft(std::string&& message);
   auto generate_packets(
     Code code, const std::vector<uint8_t>& data, std::optional<StreamNumber> stream_number = std::nullopt,
     std::optional<std::reference_wrapper<std::atomic<size_t>>> sequence_number = std::nullopt);
@@ -453,6 +459,9 @@ public:
   SCU_ALWAYS_INLINE auto get_socket() const noexcept {
     return _parent;
   }
+  SCU_ALWAYS_INLINE auto connection_id() const noexcept {
+    return _connection_id;
+  }
 };
 
 class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
@@ -463,6 +472,8 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   #else
   scorpio_utils::network::UdpSocket& _socket;
   #endif
+  std::mutex _random_engine_mutex;
+  std::mt19937_64 _random_engine;
   std::atomic<size_t> _mock_sequence_number;
   std::atomic<bool> _auto_accept;
   std::atomic<bool> _stop;
@@ -521,6 +532,11 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   void handle_disconnect_packet(const MessageHeader& header, const UdpData& data);
   void pull_awaiting_connections(std::weak_ptr<ScorpioUdpConnection> connection_weak);
   std::shared_ptr<ScorpioUdpConnection> get_connection(Ipv4 remote_ip, Port remote_port);
+
+  [[nodiscard]] SCU_ALWAYS_INLINE auto get_random_number() {
+    std::lock_guard lock(_random_engine_mutex);
+    return _random_engine();
+  }
 
 public:
   SCU_ALWAYS_INLINE bool SCU_EAGER_SELECT_IS_READY() noexcept {
