@@ -2050,23 +2050,18 @@ TEST_F(ScorpioUdpTester, already_closed_response_closes_active_stream) {
 }
 
 // =====================================================================
-// Suite 8 — bug-hunt and additional coverage
+// Suite 8 — regression tests and additional coverage
 //
-// Tests in this suite either compromise a suspected bug in
-// src/network/scorpio_udp.cpp (those are EXPECTED to fail with the current
-// implementation and serve as living bug reports) or fill obvious coverage
-// gaps. See /home/igor/.claude/plans/try-to-find-bugs-composed-puffin.md
-// for the bug report.
+// Tests in this suite were originally written as bug reports for
+// src/network/scorpio_udp.cpp. All bugs have since been fixed; these
+// tests now serve as regression coverage.
 // =====================================================================
 
-// Compromises bug 1: handle_connect_packet's ALREADY_CONNECTED branch
-// (scorpio_udp.cpp:450-457) performs no state transition, so the
-// connection's processing_thread stays in its CONNECTING-retransmit loop
-// (scorpio_udp.cpp:1059-1064) forever. A correctly-fixed implementation
-// should treat peer's ALREADY_CONNECTED as confirmation and transition to
-// CONNECTED, after which the heartbeat loop starts emitting HEARTBEAT
-// packets. We assert that a HEARTBEAT is observed; with the bug present
-// no HEARTBEAT is ever sent and ExpectPacketTimeout will time out.
+// Regression for bug 1: handle_connect_packet's ALREADY_CONNECTED branch
+// (scorpio_udp.cpp:450-457) was not transitioning to CONNECTED, leaving
+// the connection in its CONNECTING-retransmit loop. Fix: treat peer's
+// ALREADY_CONNECTED as confirmation, transition to CONNECTED, and start
+// the heartbeat loop. Test asserts a HEARTBEAT is observed.
 TEST_F(ScorpioUdpTester, connect_handles_already_connected_response) {
   auto connection_handle = ConnectionHandle::create();
   std::vector<EventQueueItem> events;
@@ -2083,13 +2078,11 @@ TEST_F(ScorpioUdpTester, connect_handles_already_connected_response) {
   execute_test(events);
 }
 
-// Compromises bug 2: handle_connect_packet's CREATE_STREAM:REJECT handler
-// (scorpio_udp.cpp:832-866) never transitions the local stream out of
-// CREATING. As a result update() (scorpio_udp.cpp:1357-1366) keeps emitting
-// CREATE_STREAM:CREATE on every heartbeat tick until SCU_UDP_CREATE_RETRY_
-// PERIOD elapses (5 s simulated). A fix should transition to REJECTED or
-// ERROR immediately and stop retransmitting. We assert no CREATE_STREAM:
-// CREATE is observed after the REJECT response.
+// Regression for bug 2: handle_connect_packet's CREATE_STREAM:REJECT handler
+// (scorpio_udp.cpp:832-866) was not transitioning the local stream out of
+// CREATING, causing repeated CREATE_STREAM:CREATE retransmits until the
+// retry timeout. Fix: transition to REJECTED immediately on REJECT response.
+// Test asserts no CREATE_STREAM:CREATE follows the REJECT.
 TEST_F(ScorpioUdpTester, outgoing_stream_rejected_transitions_out_of_creating) {
   std::vector<EventQueueItem> events;
   auto connection_handle = create_connection(events);
@@ -2248,13 +2241,10 @@ TEST_F(ScorpioUdpTester, stream_send_after_close_returns_false) {
   execute_test(events);
 }
 
-// Documents bug 4: heartbeat_packet_handler reads data[pos++] without
-// bounds-checking when a stream listed in the heartbeat is not known
-// locally (scorpio_udp.cpp:937-950). This test feeds a malformed heartbeat
-// body that ends mid-field; the connection should not panic. In practice
-// std::vector's allocator slack means the OOB read returns junk rather
-// than segfaulting, but the bug is real and should be fixed with an
-// explicit pos < data.size() check.
+// Regression for bug 4: heartbeat_packet_handler read data[pos++] without
+// bounds-checking when a stream in the heartbeat was not known locally
+// (scorpio_udp.cpp:937-950). Fix: explicit pos < data.size() check.
+// Test feeds a truncated heartbeat body and asserts no crash/panic.
 TEST_F(ScorpioUdpTester, heartbeat_unknown_stream_truncated_does_not_crash) {
   std::vector<EventQueueItem> events;
   auto connection_handle = create_connection(events);
@@ -2351,20 +2341,15 @@ TEST_F(ScorpioUdpTester, bare_heartbeat_keeps_connection_alive) {
 }
 
 // =====================================================================
-// Suite 9 - additional bug-hunt and coverage. See plan file
-// try-to-find-bugs-drifting-firefly.md (under ~/.claude/plans) for the
-// full bug report. Bug numbers below continue the numbering from Suite 8.
+// Suite 9 — regression tests and additional coverage.
+// Bug numbers continue from Suite 8; all fixed.
 // =====================================================================
 
-// Compromises bug 5: heartbeat_packet_handler at scorpio_udp.cpp:937-955
-// delegates per-stream-entry parsing to ScorpioUdpStream::handle_heartbeat_
-// data, but that function returns early without advancing `pos` when the
-// stream is unreliable (scorpio_udp.cpp:1589-1591). The outer loop then
-// reads the next stream_num from the middle of the unreliable entry's body
-// (range_count byte + first byte of initial_end) and emits CLOSE_STREAM
-// for whatever stream id those misaligned bytes decode to. With an all-
-// zero range body the spurious target is stream 0. A correctly-fixed
-// implementation must not emit a CLOSE_STREAM for any unrelated stream.
+// Regression for bug 5: heartbeat_packet_handler delegated to
+// handle_heartbeat_data but did not advance `pos` for unreliable streams
+// (scorpio_udp.cpp:1589-1591), causing the outer loop to misread the next
+// stream_num and emit a spurious CLOSE_STREAM. Fix: always advance pos
+// after each stream entry. Test asserts no CLOSE_STREAM is emitted.
 TEST_F(ScorpioUdpTester, heartbeat_for_unreliable_stream_does_not_emit_spurious_close) {
   std::vector<EventQueueItem> events;
   auto connection_handle = create_connection(events);
@@ -2379,11 +2364,9 @@ TEST_F(ScorpioUdpTester, heartbeat_for_unreliable_stream_does_not_emit_spurious_
   execute_test(events);
 }
 
-// Compromises bug 5 in a multi-entry heartbeat. A reliable stream entry
-// with a single gap is followed by an unreliable stream entry. The
-// reliable retransmit (seq 1) is correct; after that, the parser is
-// misaligned and emits a CLOSE_STREAM for some stream id decoded from
-// the unreliable entry's body. No CLOSE_STREAM is acceptable.
+// Regression for bug 5 in a multi-entry heartbeat: reliable then unreliable
+// stream. The misaligned pos after the unreliable entry caused a spurious
+// CLOSE_STREAM. Test asserts no CLOSE_STREAM follows the correct retransmit.
 TEST_F(ScorpioUdpTester, heartbeat_mixed_reliable_unreliable_does_not_corrupt_parsing) {
   std::vector<EventQueueItem> events;
   auto connection_handle = create_connection(events);
@@ -2433,11 +2416,10 @@ TEST_F(ScorpioUdpTester, heartbeat_mixed_reliable_unreliable_does_not_corrupt_pa
   execute_test(events);
 }
 
-// Compromises bug 12: incoming CREATE_STREAM with an unsupported QoS
-// (UNRELIABLE_LATEST_ONLY or RELIABLE_UNORDERED) is silently accepted at
-// scorpio_udp.cpp:766-769 even though create_stream() asserts is_supported
-// for the outgoing path. A correctly-fixed implementation must respond
-// with REJECT for an unsupported reliability mode.
+// Regression for bug 12: incoming CREATE_STREAM with unsupported QoS
+// (UNRELIABLE_LATEST_ONLY or RELIABLE_UNORDERED) was silently accepted
+// (scorpio_udp.cpp:766-769). Fix: respond with REJECT for unsupported modes.
+// Test asserts a REJECT is sent.
 TEST_F(ScorpioUdpTester, peer_unsupported_qos_create_stream_should_be_rejected) {
   std::vector<EventQueueItem> events;
   auto connection_handle = create_connection(events);
@@ -2604,5 +2586,3 @@ TEST_F(ScorpioUdpTester, unknown_command_byte_is_logged_and_ignored) {
   close_connection(events, connection_handle);
   execute_test(events);
 }
-
-// TODO(@Igor): FIXME - above comments about bugs are stale update them

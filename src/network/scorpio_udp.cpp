@@ -493,8 +493,8 @@ void ScorpioUdp::handle_connect_packet(const MessageHeader& header, const UdpDat
           SCU_LOG_ERROR(_logger, "Received ALREADY_CONNECTED for non-existing connection ip: {}, port: {}",
             udp_data.ip.str(), udp_data.port);
         } else if (connection->connection_id() != connection_id) {
-          SCU_LOG_ERROR(_logger, "Received ALREADY_CONNECTED for connection with different connection_id. ip: {}, port: {}, "
-            "existing connection_id: {}, received connection_id: {}",
+          SCU_LOG_ERROR(_logger, "Received ALREADY_CONNECTED for connection with different connection_id. "
+            "ip: {}, port: {}, existing connection_id: {}, received connection_id: {}",
             udp_data.ip.str(), udp_data.port, connection->connection_id(), connection_id);
         } else if (connection->_state.compare_exchange_strong(expected, ScorpioUdpConnection::State::CONNECTED,
         std::memory_order_relaxed, std::memory_order_relaxed)) {
