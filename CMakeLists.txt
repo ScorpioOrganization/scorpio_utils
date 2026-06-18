@@ -256,7 +256,8 @@ if(BUILD_TESTING)
     -DSCU_LOG_LEVEL=5
   )
   target_include_directories(network_framework_test PRIVATE SYSTEM ${GMOCK_INCLUDE_DIRS})
-  target_link_libraries(network_framework_test ${GMOCK_MAIN_LIBRARIES} ${GMOCK_LIBRARIES})
+  target_link_libraries(network_framework_test -fsanitize=address ${GMOCK_MAIN_LIBRARIES} ${GMOCK_LIBRARIES})
+  target_compile_options(network_framework_test PRIVATE -fsanitize=address -fno-omit-frame-pointer)
 
   target_link_libraries(test_scorpio_udp_framework
     buffered_file_saver
