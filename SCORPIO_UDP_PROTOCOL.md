@@ -125,7 +125,7 @@ Last packet:
 
 ### Subcommands
 
-Each command packet carries a 1-byte subcommand as the first payload byte.
+Each command packet carries a 1-byte subcommand as the first payload byte. `CONNECT` and `DISCONNECT` packets additionally carry an 8-byte [connection id](#connection-identity) immediately after the subcommand byte (every subcommand of both commands).
 
 **PING subcommands:**
 
@@ -153,6 +153,17 @@ Each command packet carries a 1-byte subcommand as the first payload byte.
 | 1 | ACCEPTED | responder -> initiator |
 | 2 | REJECTED | responder -> initiator |
 | 3 | ALREADY_DISCONNECTED | responder -> initiator |
+
+Both CONNECT and DISCONNECT packets lay out their payload as the subcommand byte followed by the 8-byte connection id:
+
+```
++------+---------------+-----------------------------+
+| cmd  | subcommand    | connection id               |
+| 1 B  |   1 B         |   8 B (uint64, big-endian)  |
++------+---------------+-----------------------------+
+```
+
+The responder always echoes back the connection id it received, unchanged. See [Connection identity](#connection-identity).
 
 **CREATE_STREAM subcommands:**
 
@@ -231,6 +242,18 @@ sequenceDiagram
         B->>A: DISCONNECT { ALREADY_DISCONNECTED }
     end
 ```
+
+### Connection identity
+
+Every connection carries a **connection id**: a `uint64_t` (`ConnectionId`) chosen at random by the initiator when `connect()` is called. It is sent in every CONNECT and DISCONNECT packet (all subcommands) and the acceptor stores and echoes it back unchanged.
+
+The connection id is **not** a demultiplexing key - a connection is still identified solely by its remote `ip:port`, and there is at most one connection per peer address. The id exists only as a guard against a peer that dies and restarts so fast that the other side never noticed the old connection went stale.
+
+How the id is used:
+
+- **CONNECT for an existing connection.** If the stored id matches, the acceptor replies `ALREADY_CONNECTED`. If it differs (a restarted peer reusing the same address with a fresh id), the acceptor **soft-panics its own stale connection and sends nothing back**. The old connection drops to `ERROR` (no longer alive) and is evicted on the next lookup; the initiator keeps retrying CONNECT every heartbeat and gets accepted once the stale entry is gone.
+- **ACCEPTED / REJECTED / ALREADY_CONNECTED responses.** Ignored if the id does not match the local connection (`ACCEPTED` with a mismatched id also draws an `ERROR` reply). This prevents a late reply meant for a previous incarnation from advancing the current connection's state.
+- **DISCONNECT.** Accepted (replied `ACCEPTED`, connection closed) only when the id matches a live connection for that address; otherwise the responder replies `ALREADY_DISCONNECTED`. A late DISCONNECT response addressed to a previous incarnation is therefore ignored and cannot tear down a freshly re-established connection.
 
 ## Stream Lifecycle
 
