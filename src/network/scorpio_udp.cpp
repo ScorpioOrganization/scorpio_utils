@@ -37,6 +37,9 @@ using scorpio_utils::network::StreamNumber;
 using scorpio_utils::network::UdpData;
 using scorpio_utils::network::TimeProvider;
 
+static_assert(sizeof(Code::ConnectSubCommands) == 1, "ConnectSubCommands size is assumed to be 1 byte");
+static_assert(sizeof(Code::DisconnectSubCommands) == 1, "DisconnectSubCommands size is assumed to be 1 byte");
+
 #define AS_BYTE(x) (SCU_AS(uint8_t, x))
 
 struct PanicException : public std::exception { };
@@ -163,6 +166,7 @@ ScorpioUdp::ScorpioUdp(
 #ifdef SCU_UDP_MOCK
   _socket(socket),
 #endif
+  _random_engine(SCU_AS(uint64_t, std::random_device{ }()) << 32 | SCU_AS(uint64_t, std::random_device{ }())),
   _auto_accept(false),
   _stop(true),
   _logger(logger),
@@ -389,43 +393,63 @@ void ScorpioUdp::handle_ping_packet(const MessageHeader& header, const UdpData& 
 }
 
 void ScorpioUdp::handle_connect_packet(const MessageHeader& header, const UdpData& udp_data) {
-  if (udp_data.data.size() - header.data_offset != 1) {
+  if (udp_data.data.size() - header.data_offset != sizeof(Code::ConnectSubCommands) + sizeof(ConnectionId)) {
     // TODO(@Igor): Handle error properly
     SCU_LOG_ERROR(_logger,
-      "Invalid CONNECT packet size: expected 1 byte for subcommand, got {}",
-      udp_data.data.size() - header.data_offset);
+      "Invalid CONNECT packet size: expected {} byte for subcommand, got {}",
+      sizeof(Code::ConnectSubCommands) + sizeof(ConnectionId), udp_data.data.size() - header.data_offset);
     return;
   }
   SCU_LOG_TRACE(_logger, "Handling CONNECT packet from {}:{}. Subcommand: {}",
-    udp_data.ip.str(), udp_data.port, SCU_AS(Code::ConnectionSubCommands, udp_data.data[header.data_offset]));
-  switch (SCU_AS(Code::ConnectionSubCommands, udp_data.data[header.data_offset])) {
-    case Code::ConnectionSubCommands::CONNECT: {
-        if (get_connection(udp_data.ip, udp_data.port)) {
-          send_or_panic(std::nullopt, _mock_sequence_number, Code::CONNECT,
-                      udp_data.ip, udp_data.port,
-            { AS_BYTE(Code::ConnectionSubCommands::ALREADY_CONNECTED) },
-                    "Failed to send ALREADY_CONNECTED response");
+    udp_data.ip.str(), udp_data.port, SCU_AS(Code::ConnectSubCommands, udp_data.data[header.data_offset]));
+  size_t offset = header.data_offset + sizeof(Code::ConnectSubCommands);
+  ConnectionId connection_id;
+  SCU_DO_AND_ASSERT(scorpio_utils::network::network_to_host(udp_data.data, &connection_id, offset),
+    "Failed to parse connection_id from CONNECT packet");
+  switch (SCU_AS(Code::ConnectSubCommands, udp_data.data[header.data_offset])) {
+    case Code::ConnectSubCommands::CONNECT: {
+        const auto connection = get_connection(udp_data.ip, udp_data.port);
+        std::vector<uint8_t> connect_data;
+        connect_data.resize(sizeof(Code::ConnectSubCommands) + sizeof(ConnectionId));
+        offset = sizeof(Code::ConnectSubCommands);
+        SCU_DO_AND_ASSERT(host_to_network(connection_id, connect_data, offset),
+          "Failed to convert connection ID to network format for CONNECT packet");
+        if (connection) {
+          if (connection->connection_id() != connection_id) {
+            // TODO(@Igor): Handle error properly
+            SCU_LOG_ERROR(_logger,
+                          "Received CONNECT for existing connection with different connection_id. ip: {}, port: {}, "
+                          "existing connection_id: {}, received connection_id: {}",
+              udp_data.ip.str(), udp_data.port, connection->connection_id(), connection_id);
+            connection->panic_soft("Received CONNECT for connection with same ip and port but different connection_id");
+            // Lets send nothing here it is not the cleanest solution but this way we will not create a new connection
+            // and will not reject it either. The client will try again in some time
+            // and meanwhile some old packets will be send/dropped
+          } else {
+            connect_data[0] = AS_BYTE(Code::ConnectSubCommands::ALREADY_CONNECTED);
+            send_or_panic(std::nullopt, _mock_sequence_number, Code::CONNECT,
+                        udp_data.ip, udp_data.port,
+              connect_data, "Failed to send ALREADY_CONNECTED response");
+          }
         } else if (_auto_accept.load(std::memory_order_relaxed)) {
           std::shared_ptr<ScorpioUdpConnection> new_connection(new ScorpioUdpConnection(
-                      udp_data.ip, udp_data.port, shared_from_this()));
+                      udp_data.ip, udp_data.port, connection_id, shared_from_this()));
           new_connection->_start_signal.notify(100000);
           new_connection->_state.store(ScorpioUdpConnection::State::CONNECTING);
           _connections.insert({ { udp_data.ip, udp_data.port }, new_connection });
           SCU_ASSERT(_new_connections, "Channel must exist if auto accept is enabled");
           _new_connections->send<true>(new_connection);
+          connect_data[0] = AS_BYTE(Code::ConnectSubCommands::ACCEPTED);
           send_or_panic(std::nullopt, _mock_sequence_number, Code::CONNECT,
-                      udp_data.ip, udp_data.port,
-            { AS_BYTE(Code::ConnectionSubCommands::ACCEPTED) },
-                      "Failed to send ACCEPTED response");
+                      udp_data.ip, udp_data.port, connect_data, "Failed to send ACCEPTED response");
           new_connection->connected();
         } else {
+          connect_data[0] = AS_BYTE(Code::ConnectSubCommands::REJECTED);
           send_or_panic(std::nullopt, _mock_sequence_number, Code::CONNECT,
-                      udp_data.ip, udp_data.port,
-            { AS_BYTE(Code::ConnectionSubCommands::REJECTED) },
-                      "Failed to send REJECTED response");
+                      udp_data.ip, udp_data.port, connect_data, "Failed to send REJECTED response");
         }
       } break;
-    case Code::ConnectionSubCommands::ACCEPTED: {
+    case Code::ConnectSubCommands::ACCEPTED: {
         auto connection = get_connection(udp_data.ip, udp_data.port);
         if (!connection) {
           SCU_LOG_ERROR(_logger, "Received ACCEPTED for non-existing connection ip: {}, port: {}",
@@ -433,29 +457,45 @@ void ScorpioUdp::handle_connect_packet(const MessageHeader& header, const UdpDat
           // TODO(@Igor): Handle error properly
           send_or_panic(std::nullopt, _mock_sequence_number, Code::ERROR, udp_data.ip, udp_data.port,
             { }, "Failed to send ERROR response for ACCEPTED subcommand for non-existing connection");
+        } else if (connection->connection_id() != connection_id) {
+          SCU_LOG_ERROR(_logger, "Received ACCEPTED for connection with different connection_id. ip: {}, port: {}, "
+            "existing connection_id: {}, received connection_id: {}",
+            udp_data.ip.str(), udp_data.port, connection->connection_id(), connection_id);
+          // TODO(@Igor): Handle error properly
+          send_or_panic(std::nullopt, _mock_sequence_number, Code::ERROR, udp_data.ip, udp_data.port,
+            { }, "Failed to send ERROR response for ACCEPTED subcommand for connection with different connection_id");
         } else if (!connection->connected()) {
           SCU_LOG_ERROR(_logger, "Received ACCEPTED for connection not in CONNECTING state. ip: {}, port: {}",
             udp_data.ip.str(), udp_data.port);
           // TODO(@Igor): Handle error properly
         }
       } break;
-    case Code::ConnectionSubCommands::REJECTED: {
+    case Code::ConnectSubCommands::REJECTED: {
         auto connection = get_connection(udp_data.ip, udp_data.port);
         if (!connection) {
           // TODO(@Igor): Handle error properly
           SCU_LOG_ERROR(_logger, "Received REJECTED for non-existing connection ip: {}, port: {}",
             udp_data.ip.str(), udp_data.port);
+        } else if (connection->connection_id() != connection_id) {
+          SCU_LOG_ERROR(_logger, "Received REJECTED for connection with different connection_id. ip: {}, port: {}, "
+            "existing connection_id: {}, received connection_id: {}",
+            udp_data.ip.str(), udp_data.port, connection->connection_id(), connection_id);
+          // TODO(@Igor): Handle error properly
         } else {
           SCU_LOG_INFO(_logger, "Connection rejected by {}:{}", udp_data.ip.str(), udp_data.port);
           connection->_state = ScorpioUdpConnection::State::REJECTED;
         }
       } break;
-    case Code::ConnectionSubCommands::ALREADY_CONNECTED: {
+    case Code::ConnectSubCommands::ALREADY_CONNECTED: {
         auto connection = get_connection(udp_data.ip, udp_data.port);
         ScorpioUdpConnection::State expected = ScorpioUdpConnection::State::CONNECTING;
         if (!connection) {
           SCU_LOG_ERROR(_logger, "Received ALREADY_CONNECTED for non-existing connection ip: {}, port: {}",
             udp_data.ip.str(), udp_data.port);
+        } else if (connection->connection_id() != connection_id) {
+          SCU_LOG_ERROR(_logger, "Received ALREADY_CONNECTED for connection with different connection_id. "
+            "ip: {}, port: {}, existing connection_id: {}, received connection_id: {}",
+            udp_data.ip.str(), udp_data.port, connection->connection_id(), connection_id);
         } else if (connection->_state.compare_exchange_strong(expected, ScorpioUdpConnection::State::CONNECTED,
         std::memory_order_relaxed, std::memory_order_relaxed)) {
           SCU_LOG_INFO(_logger, "Connection established (ALREADY_CONNECTED) with {}:{}",
@@ -474,29 +514,38 @@ void ScorpioUdp::handle_connect_packet(const MessageHeader& header, const UdpDat
 }
 
 void ScorpioUdp::handle_disconnect_packet(const MessageHeader& header, const UdpData& udp_data) {
-  if (udp_data.data.size() - header.data_offset != 1) {
+  if (udp_data.data.size() - header.data_offset != sizeof(Code::DisconnectSubCommands) + sizeof(ConnectionId)) {
     // TODO(@Igor): Handle error properly
     SCU_LOG_ERROR(_logger,
-      "Invalid DISCONNECT packet size: expected 1 byte for subcommand, got {}",
-      udp_data.data.size() - header.data_offset);
+      "Invalid DISCONNECT packet size: expected {} byte for subcommand, got {}",
+      sizeof(Code::DisconnectSubCommands) + sizeof(ConnectionId), udp_data.data.size() - header.data_offset);
     return;
   }
   SCU_LOG_TRACE(_logger, "Handling DISCONNECT packet from {}:{}. Subcommand: {}",
     udp_data.ip.str(), udp_data.port, SCU_AS(Code::DisconnectSubCommands, udp_data.data[header.data_offset]));
+  size_t offset = header.data_offset + sizeof(Code::DisconnectSubCommands);
+  ConnectionId connection_id;
+  SCU_DO_AND_ASSERT(scorpio_utils::network::network_to_host(udp_data.data, &connection_id, offset),
+    "Failed to parse connection_id from DISCONNECT packet");
   switch (SCU_AS(Code::DisconnectSubCommands, udp_data.data[header.data_offset])) {
     case Code::DisconnectSubCommands::DISCONNECT: {
+        std::vector<uint8_t> data;
+        data.resize(sizeof(Code::DisconnectSubCommands) + sizeof(ConnectionId));
+        offset = sizeof(Code::DisconnectSubCommands);
+        SCU_DO_AND_ASSERT(scorpio_utils::network::host_to_network(connection_id, data, offset),
+        "Failed to serialize connection_id for DISCONNECT packet");
         if (auto connection_opt = get_connection(udp_data.ip, udp_data.port);
-          connection_opt != nullptr && connection_opt->is_alive()) {
+          connection_opt != nullptr && connection_opt->is_alive() && connection_opt->connection_id() == connection_id) {
+          data[0] = AS_BYTE(Code::DisconnectSubCommands::ACCEPTED);
           send_or_panic(std::nullopt, _mock_sequence_number, Code::DISCONNECT,
-          udp_data.ip, udp_data.port,
-            { AS_BYTE(Code::DisconnectSubCommands::ACCEPTED) },
+          udp_data.ip, udp_data.port, data,
           "Failed to send DISCONNECT ACCEPTED response");
           connection_opt->close(false);
         } else {
           // Handle disconnect for non-existing connection
+          data[0] = AS_BYTE(Code::DisconnectSubCommands::ALREADY_DISCONNECTED);
           send_or_panic(std::nullopt, _mock_sequence_number, Code::DISCONNECT,
-          udp_data.ip, udp_data.port,
-            { AS_BYTE(Code::DisconnectSubCommands::ALREADY_DISCONNECTED) },
+          udp_data.ip, udp_data.port, data,
           "Failed to send DISCONNECT ACCEPTED response for non-existing connection");
         }
       } break;
@@ -546,12 +595,17 @@ SCU_HOT void ScorpioUdp::process_packet(UdpData udp_data) {
 void ScorpioUdp::pull_awaiting_connections(std::weak_ptr<ScorpioUdpConnection> connection_weak) {
   if (auto connection = connection_weak.lock()) {
     if (get_connection(connection->remote_ip(), connection->remote_port())) {
-      connection->panic("Connection already exists");
+      connection->panic_soft("Connection already exists");
     } else {
       SCU_ASSERT(connection->state() == ScorpioUdpConnection::State::NEW,
           "Connection in invalid state");
+      std::vector<uint8_t> data(sizeof(Code::ConnectSubCommands) + sizeof(ConnectionId));
+      data[0] = AS_BYTE(Code::ConnectSubCommands::CONNECT);
+      size_t offset = sizeof(Code::ConnectSubCommands);
+      SCU_DO_AND_ASSERT(scorpio_utils::network::host_to_network(connection->connection_id(), data, offset),
+        "Failed to serialize connection_id for CONNECT packet");
       send_or_panic(std::nullopt, _mock_sequence_number, Code::CONNECT, connection->remote_ip(),
-          connection->remote_port(), { AS_BYTE(Code::ConnectionSubCommands::CONNECT) });
+          connection->remote_port(), data, "Failed to send CONNECT packet");
       connection->_state.store(ScorpioUdpConnection::State::CONNECTING, std::memory_order_relaxed);
       auto address_pair = std::make_pair(connection->remote_ip(), connection->remote_port());
       _connections.insert({ address_pair, std::move(connection) });
@@ -700,7 +754,8 @@ void ScorpioUdp::send_or_panic(
 std::shared_ptr<ScorpioUdpConnection> ScorpioUdp::connect(
   Ipv4 ip,
   Port port) {
-  std::shared_ptr<ScorpioUdpConnection> connection(new ScorpioUdpConnection(ip, port, shared_from_this()));
+  std::shared_ptr<ScorpioUdpConnection> connection(new ScorpioUdpConnection(ip, port, get_random_number(),
+    shared_from_this()));
   connection->_start_signal.notify(100000);
   _awaiting_connections_channel.send<true>(connection);
   return connection;
@@ -708,9 +763,12 @@ std::shared_ptr<ScorpioUdpConnection> ScorpioUdp::connect(
 
 // ========================= ScorpioUdpConnection implementation =======================
 
-ScorpioUdpConnection::ScorpioUdpConnection(Ipv4 remote_ip, Port remote_port, std::shared_ptr<ScorpioUdp> parent)
+ScorpioUdpConnection::ScorpioUdpConnection(
+  Ipv4 remote_ip, Port remote_port, ConnectionId connection_id,
+  std::shared_ptr<ScorpioUdp> parent)
 : _remote_ip(remote_ip),
   _remote_port(remote_port),
+  _connection_id{connection_id},
   _sequence_number(0),
   _panic(false),
   _state(State::NEW),
@@ -1098,11 +1156,19 @@ void ScorpioUdpConnection::processing_thread() {
       std::this_thread::sleep_for(std::chrono::nanoseconds(SCU_UDP_HEARTBEAT_PERIOD / 4));
     }
     std::this_thread::sleep_for(std::chrono::nanoseconds(SCU_UDP_HEARTBEAT_PERIOD));
-    while (SCU_LIKELY((self = self_weak.lock()) && !_stop.load(std::memory_order_relaxed)) &&
-      _state.load(std::memory_order_relaxed) == State::CONNECTING) {
-      SCU_DEFER([&self] { self.reset(); });
-      send_or_panic(Code::CONNECT, { AS_BYTE(Code::ConnectionSubCommands::CONNECT) });
-      std::this_thread::sleep_for(std::chrono::nanoseconds(SCU_UDP_HEARTBEAT_PERIOD));
+    {
+      std::vector<uint8_t> connect_data;
+      connect_data.resize(sizeof(Code::ConnectSubCommands) + sizeof(ConnectionId));
+      connect_data[0] = AS_BYTE(Code::ConnectSubCommands::CONNECT);
+      size_t offset = 1;
+      SCU_DO_AND_ASSERT(host_to_network(_connection_id, connect_data, offset),
+        "Failed to convert connection ID to network format");
+      while (SCU_LIKELY((self = self_weak.lock()) && !_stop.load(std::memory_order_relaxed)) &&
+        _state.load(std::memory_order_relaxed) == State::CONNECTING) {
+        SCU_DEFER([&self] { self.reset(); });
+        send_or_panic(Code::CONNECT, connect_data);
+        std::this_thread::sleep_for(std::chrono::nanoseconds(SCU_UDP_HEARTBEAT_PERIOD));
+      }
     }
     if (SCU_UNLIKELY((self = self_weak.lock()) == nullptr || _stop.load(std::memory_order_relaxed))) {
       return;
@@ -1131,6 +1197,19 @@ void ScorpioUdpConnection::processing_thread() {
   } catch (const PanicException&) {
   } catch (const threading::ClosedChannelException&) {
   }
+}
+
+SCU_COLD void ScorpioUdpConnection::panic_soft(std::string&& message) {
+  std::unique_lock<std::mutex> lock(_panic_mutex, std::try_to_lock);
+  if (!lock.owns_lock()) {
+    // No need for waiting since panic_soft shall be called from the socket thread
+    return;
+  }
+  SCU_LOG_FATAL(_logger, "Connection panic: {}", message);
+  _panic_message = std::move(message);
+  _panic.store(true, std::memory_order_release);
+  _state.store(State::ERROR, std::memory_order_relaxed);
+  _stop.store(true, std::memory_order_relaxed);
 }
 
 SCU_COLD SCU_NORETURN void ScorpioUdpConnection::panic(std::string&& message) {
@@ -1199,8 +1278,13 @@ bool ScorpioUdpConnection::close(bool send_disconnect) {
   }
   SCU_LOG_INFO(_logger, "Closing connection {}:{}", _remote_ip.str(), _remote_port);
   if (send_disconnect) {
-    send(Code::DISCONNECT, { AS_BYTE(Code::DisconnectSubCommands::DISCONNECT) },
-      std::nullopt, std::nullopt);
+    std::vector<uint8_t> disconnect_data;
+    disconnect_data.resize(sizeof(Code::DisconnectSubCommands) + sizeof(ConnectionId));
+    disconnect_data[0] = AS_BYTE(Code::DisconnectSubCommands::DISCONNECT);
+    size_t offset = 1;
+    SCU_DO_AND_ASSERT(host_to_network(_connection_id, disconnect_data, offset),
+      "Failed to convert connection ID to network format for DISCONNECT packet");
+    send(Code::DISCONNECT, disconnect_data, std::nullopt, std::nullopt);
   }
   _stop.store(true, std::memory_order_relaxed);
   _state.store(State::CLOSED, std::memory_order_relaxed);

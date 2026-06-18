@@ -99,7 +99,7 @@ TEST(ScorpioUdpGmock, Listen) {
 // generate_packets(
 // std::nullopt,
 // seq_num, Code::CONNECT,
-// { SCU_AS(uint8_t, Code::ConnectionSubCommands::CONNECT) }
+// { SCU_AS(uint8_t, Code::ConnectSubCommands::CONNECT) }
 // );
 // ASSERT_TRUE(connect_packet_opt.has_value());
 // ASSERT_EQ(connect_packet_opt->second.size(), 1);
@@ -110,7 +110,7 @@ TEST(ScorpioUdpGmock, Listen) {
 // generate_packets(
 // std::nullopt,
 // seq_num, Code::CONNECT,
-// { SCU_AS(uint8_t, Code::ConnectionSubCommands::ACCEPTED) }
+// { SCU_AS(uint8_t, Code::ConnectSubCommands::ACCEPTED) }
 // );
 // ASSERT_TRUE(connect_accept_opt.has_value());
 // ASSERT_EQ(connect_accept_opt->second.size(), 1);
