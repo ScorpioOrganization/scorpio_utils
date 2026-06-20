@@ -9,6 +9,7 @@
 
 #include "scorpio_utils/decorators.hpp"
 #include "scorpio_utils/network/scorpio_udp.hpp"
+#include "scorpio_utils/threading/jthread.hpp"
 
 using scorpio_utils::network::Ipv4;
 using scorpio_utils::network::localhost;
@@ -62,7 +63,7 @@ auto get_client_server_connection(scorpio_utils::network::Port port) {
 TEST(MockScorpioUdp, BasicSend) {
   const auto port = PORT;
   std::atomic<bool> server_ready(false);
-  std::thread server([&server_ready, port]() {
+  scorpio_utils::threading::JThread server([&server_ready, port]() {
       auto socket = ScorpioUdp::create();
       ASSERT_TRUE(socket->start());
       std::ignore = socket->set_auto_accept(true);
@@ -70,7 +71,7 @@ TEST(MockScorpioUdp, BasicSend) {
       server_ready.store(true, std::memory_order_relaxed);
       std::this_thread::sleep_for(std::chrono::milliseconds(400));
       auto connection = socket->get_accepted_connection();
-      EXPECT_TRUE(connection.has_value());
+      ASSERT_TRUE(connection.has_value());
       connection.value()->set_auto_accept_stream(true);
       std::this_thread::sleep_for(std::chrono::seconds(3));
       EXPECT_EQ(connection.value()->state(), ScorpioUdpConnection::State::CONNECTED);
@@ -79,7 +80,8 @@ TEST(MockScorpioUdp, BasicSend) {
       ASSERT_TRUE(stream.has_value());
       EXPECT_EQ(stream.value()->state(), ScorpioUdpStream::State::CREATED);
       std::this_thread::sleep_for(std::chrono::seconds(4));
-      auto data = stream.value()->receive<false>();
+      std::optional<std::vector<uint8_t>> data;
+      EXPECT_NO_THROW(data = stream.value()->receive<false>());
       ASSERT_TRUE(data.has_value());
       EXPECT_EQ(data.value(), (std::vector<uint8_t>{ 'H', 'e', 'l', 'l', 'o', ' ', 'W', 'o', 'r', 'l', 'd', '!' }));
       std::this_thread::sleep_for(std::chrono::seconds(5));
@@ -103,9 +105,9 @@ TEST(MockScorpioUdp, BasicSend) {
   EXPECT_TRUE(stream->is_alive());
   ASSERT_TRUE(stream->send(std::vector<uint8_t>{ 'H', 'e', 'l', 'l', 'o', ' ', 'W', 'o', 'r', 'l', 'd', '!' }));
   EXPECT_EQ(stream->state(), ScorpioUdpStream::State::CREATED);
-  if (server.joinable()) {
-    server.join();
-  }
+  // Join the server while the client (socket/connection/stream) is still alive, so the server's
+  // connection stays open when it calls get_accepted_stream() instead of throwing ClosedChannelException.
+  server.join();
 }
 
 TEST(MockScorpioUdp, ClientServerCreation) {

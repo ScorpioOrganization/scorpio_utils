@@ -1391,6 +1391,14 @@ TEST_F(ScorpioUdpTester, reconnect_same_address_before_disconnect_accept) {
   // conn1: outgoing connect + handshake (helper uses the same 127.0.0.1:12345).
   auto conn1 = create_connection(events);
 
+  // create_connection only asserts is_alive(), which is already satisfied in the
+  // CONNECTING state, so conn1's injected CONNECT/ACCEPTED may still be sitting
+  // unprocessed in the receive queue. Let the socket finish the handshake before
+  // the local close below; otherwise the ACCEPTED is handled *after* close() and
+  // the implementation emits a stray ERROR packet (ACCEPTED for a non-existing
+  // connection) that lands ahead of conn2's CONNECT and breaks expect_connect.
+  events.push_back({ WHERE, TICK_TIME, std::make_unique<NoOpEvent>() });
+
   // Quick local disconnect. close() emits DISCONNECT/DISCONNECT; drain it so the
   // later CONNECT expectation does not trip over it.
   events.push_back({ WHERE, 0, conn1->close_connection(true) });

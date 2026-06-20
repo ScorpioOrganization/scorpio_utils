@@ -40,7 +40,7 @@ SCU_ALWAYS_INLINE void host_to_network(const S* src, T* target, size_t size) {
 
 template<typename T>
 bool network_to_host(const std::vector<uint8_t>& src, T* target, size_t& pos) {
-  if (pos + sizeof(T) > src.size()) {
+  if (SCU_UNLIKELY(pos + sizeof(T) > src.size())) {
     return false;
   }
   network_to_host(src.data() + pos, target, sizeof(T));
@@ -50,7 +50,7 @@ bool network_to_host(const std::vector<uint8_t>& src, T* target, size_t& pos) {
 
 template<typename T>
 bool host_to_network(T src, std::vector<uint8_t>& target, size_t& pos) {
-  if (pos + sizeof(T) > target.size()) {
+  if (SCU_UNLIKELY(pos + sizeof(T) > target.size())) {
     return false;
   }
   host_to_network<T>(&src, target.data() + pos, sizeof(T));

@@ -168,6 +168,10 @@ if(BUILD_TESTING)
     ament_target_dependencies(${TEST_NAME} rclcpp std_msgs)
   endforeach()
 
+  # Real-socket integration suite runs 6 sleep-dominated cases sequentially (~60s),
+  # right on the ament_add_gtest 60s default. Give it a generous budget.
+  set_tests_properties(test_scorpio_udp PROPERTIES TIMEOUT 180)
+
   add_library(network_mock STATIC
     test/network/mock_udp.cpp
     src/network/ip.cpp
@@ -244,7 +248,7 @@ if(BUILD_TESTING)
   )
 
   # Test of scorpio_udp with framework
-  ament_add_gtest(test_scorpio_udp_framework test/network/test_scorpio_udp_framework.cpp)
+  ament_add_gtest(test_scorpio_udp_framework test/network/test_scorpio_udp_framework.cpp TIMEOUT 180)
 
   add_library(network_framework_test STATIC
     src/network/ip.cpp
@@ -256,8 +260,8 @@ if(BUILD_TESTING)
     -DSCU_LOG_LEVEL=5
   )
   target_include_directories(network_framework_test PRIVATE SYSTEM ${GMOCK_INCLUDE_DIRS})
-  target_link_libraries(network_framework_test -fsanitize=address ${GMOCK_MAIN_LIBRARIES} ${GMOCK_LIBRARIES})
-  target_compile_options(network_framework_test PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+  target_link_libraries(network_framework_test -fsanitize=address,undefined ${GMOCK_MAIN_LIBRARIES} ${GMOCK_LIBRARIES})
+  target_compile_options(network_framework_test PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
 
   target_link_libraries(test_scorpio_udp_framework
     buffered_file_saver
