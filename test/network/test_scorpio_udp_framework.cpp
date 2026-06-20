@@ -39,8 +39,6 @@ using scorpio_utils::Success;
 using scorpio_utils::Unexpected;
 using scorpio_utils::testing::MockTimeProvider;
 
-std::shared_ptr<scorpio_utils::testing::MockTimeProvider> get_time_provider();
-
 #define AS_BYTE(x) (SCU_AS(uint8_t, x))
 #define TICK_TIME (SCU_UDP_HEARTBEAT_PERIOD)
 #define WHERE (__FILE__ ":" + std::to_string(__LINE__))
@@ -378,7 +376,7 @@ static bool is_background_packet(
 static Expected<Success, std::string> drain_until_match(
   UdpSocket& socket, Ipv4 remote_ip, Port remote_port,
   const std::vector<uint8_t>& expected, int64_t period, size_t max_attempts) {
-  const auto time_provider = get_time_provider();
+  const auto time_provider = ScorpioUdp::get_time_provider();
   for (size_t attempt = 0; attempt < max_attempts; ++attempt) {
     while (auto result = socket.get_from_send_queue<false>()) {
       auto [ip, port, data] = *std::move(result);
@@ -490,7 +488,7 @@ public:
     UdpSocket& socket,
     std::shared_ptr<ScorpioUdp>
   ) override {
-    const auto time_provider = get_time_provider();
+    const auto time_provider = ScorpioUdp::get_time_provider();
     for (size_t attempt = 0; attempt < _max_attempts; ++attempt) {
       while (auto result = socket.get_from_send_queue<false>()) {
         auto [ip, port, data] = *std::move(result);
@@ -534,7 +532,7 @@ public:
     UdpSocket&,
     std::shared_ptr<ScorpioUdp>
   ) override {
-    const auto time_provider = get_time_provider();
+    const auto time_provider = ScorpioUdp::get_time_provider();
     int64_t remaining = _ns;
     while (remaining > 0) {
       const auto step = std::min<int64_t>(remaining, TICK_TIME);
@@ -605,7 +603,7 @@ public:
     UdpSocket& socket,
     std::shared_ptr<ScorpioUdp>
   ) override {
-    const auto time_provider = get_time_provider();
+    const auto time_provider = ScorpioUdp::get_time_provider();
     for (size_t attempt = 0; attempt < _max_attempts; ++attempt) {
       while (auto result = socket.get_from_send_queue<false>()) {
         auto [ip, port, data] = *std::move(result);
@@ -752,7 +750,7 @@ public:
     ) override {
       SCU_ASSERT(_handle->_connection.has_value(), "Handle does not contain a connection");
       const auto& conn = *(_handle->_connection);
-      const auto time_provider = get_time_provider();
+      const auto time_provider = ScorpioUdp::get_time_provider();
       for (size_t attempt = 0; attempt < _max_attempts; ++attempt) {
         if (conn->is_alive() == _expect_alive) {
           return Success();
@@ -824,7 +822,7 @@ public:
     ) override {
       SCU_ASSERT(_handle->_connection.has_value(), "Handle does not contain a connection");
       const auto& conn = *(_handle->_connection);
-      const auto time_provider = get_time_provider();
+      const auto time_provider = ScorpioUdp::get_time_provider();
       for (size_t attempt = 0; attempt < _max_attempts; ++attempt) {
         if (conn->is_panic() == _expect_panic) {
           return Success();
@@ -1097,7 +1095,7 @@ public:
     ) override {
       SCU_ASSERT(_handle->_stream.has_value(), "Handle does not contain a stream");
       const auto& stream = *(_handle->_stream);
-      const auto time_provider = get_time_provider();
+      const auto time_provider = ScorpioUdp::get_time_provider();
       for (size_t attempt = 0; attempt < _max_attempts; ++attempt) {
         if (auto result = stream->receive<false>()) {
           if (SCU_UNLIKELY(*result != _expected)) {
@@ -1143,7 +1141,7 @@ public:
     ) override {
       SCU_ASSERT(_handle->_stream.has_value(), "Handle does not contain a stream");
       const auto& stream = *(_handle->_stream);
-      const auto time_provider = get_time_provider();
+      const auto time_provider = ScorpioUdp::get_time_provider();
       for (size_t attempt = 0; attempt < _max_attempts; ++attempt) {
         if (auto result = stream->receive<false>()) {
           return Unexpected("Unexpected data received on stream: "s + packet_to_string(*result));
@@ -1187,7 +1185,7 @@ public:
     ) override {
       SCU_ASSERT(_handle->_stream.has_value(), "Handle does not contain a stream");
       const auto& stream = *(_handle->_stream);
-      const auto time_provider = get_time_provider();
+      const auto time_provider = ScorpioUdp::get_time_provider();
       for (size_t attempt = 0; attempt < _max_attempts; ++attempt) {
         if (stream->is_active() == _expect_active) {
           return Success();
@@ -1232,7 +1230,7 @@ public:
     ) override {
       SCU_ASSERT(_handle->_stream.has_value(), "Handle does not contain a stream");
       const auto& stream = *(_handle->_stream);
-      const auto time_provider = get_time_provider();
+      const auto time_provider = ScorpioUdp::get_time_provider();
       for (size_t attempt = 0; attempt < _max_attempts; ++attempt) {
         if (stream->is_alive() == _expect_alive) {
           return Success();
@@ -1277,7 +1275,7 @@ public:
     ) override {
       SCU_ASSERT(_handle->_stream.has_value(), "Handle does not contain a stream");
       const auto& stream = *(_handle->_stream);
-      const auto time_provider = get_time_provider();
+      const auto time_provider = ScorpioUdp::get_time_provider();
       for (size_t attempt = 0; attempt < _max_attempts; ++attempt) {
         if (stream->is_panic() == _expect_panic) {
           return Success();
@@ -1321,7 +1319,7 @@ protected:
   void SetUp() override {
     _task_execution = 0;
     _socket = std::make_unique<decltype(_socket)::element_type>();
-    _time_provider = get_time_provider();
+    _time_provider = ScorpioUdp::get_time_provider();
     _time_provider->set_time(0);
     _connection = ScorpioUdp::create(*_socket);
     stabilize_delay();

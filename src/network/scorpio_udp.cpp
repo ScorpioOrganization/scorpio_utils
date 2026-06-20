@@ -98,21 +98,6 @@ SCU_HOT SCU_PURE static scorpio_utils::Expected<MessageHeader, std::string> pars
   return header;
 }
 
-#ifndef SCU_UDP_MOCK
-static
-#endif
-std::shared_ptr<TimeProvider> get_time_provider() {
-  static std::mutex mutex;
-  std::lock_guard lock(mutex);
-  static std::weak_ptr<TimeProvider> weak_provider;
-  if (auto provider = weak_provider.lock()) {
-    return provider;
-  }
-  auto provider = std::make_shared<TimeProvider>();
-  weak_provider = provider;
-  return provider;
-}
-
 static std::optional<ScorpioUdpStream::StreamQoS> parse_qos(const std::vector<uint8_t>& data, size_t& offset) {
   ScorpioUdpStream::StreamQoS qos{ 0, ScorpioUdpStream::StreamQoS::Reliability::UNRELIABLE };
   if (!scorpio_utils::network::network_to_host(data, &qos.reliability, offset)) {
@@ -135,6 +120,18 @@ static void serialize_qos(const ScorpioUdpStream::StreamQoS& qos, std::vector<ui
 }
 
 // ========================= ScorpioUdp implementation =================================
+
+std::shared_ptr<TimeProvider> ScorpioUdp::get_time_provider() {
+  static std::mutex mutex;
+  std::lock_guard lock(mutex);
+  static std::weak_ptr<TimeProvider> weak_provider;
+  if (auto provider = weak_provider.lock()) {
+    return provider;
+  }
+  auto provider = std::make_shared<TimeProvider>();
+  weak_provider = provider;
+  return provider;
+}
 
 std::shared_ptr<ScorpioUdp> ScorpioUdp::create(
 #ifdef SCU_UDP_MOCK
@@ -1020,6 +1017,8 @@ void ScorpioUdpConnection::close_stream_packet_handler(const MessageHeader& head
 void ScorpioUdpConnection::heartbeat_packet_handler(const MessageHeader& header, UdpData&& data) {
   size_t pos = header.data_offset;
   StreamNumber stream_num;
+  _last_received_heartbeat_time.store(_time_provider->get_time(), std::memory_order_relaxed);
+  _received_heartbeat_count.fetch_add(1, std::memory_order_relaxed);
   while (network_to_host(data.data, &stream_num, pos)) {
     if (auto stream = get_stream(stream_num)) {
       stream->handle_heartbeat_data(data.data, pos);
@@ -1104,6 +1103,7 @@ void ScorpioUdpConnection::process_packets(
   SCU_LOG_TRACE(_logger, "Processing packet from {}:{}. Packet size: {} bytes",
       packet.second.ip.str(), packet.second.port, packet.second.data.size());
   _last_received_packet_time.store(_time_provider->get_time(), std::memory_order_relaxed);
+  _received_packet_count.fetch_add(1, std::memory_order_relaxed);
   handle_new_packet(packet.first, std::move(packet.second));
 }
 
@@ -1711,14 +1711,14 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
   SCU_LOG_TRACE(_logger, "Handling heartbeat data for stream {} with data size {} bytes", _stream_number,
     data.size() - pos);
   if (SCU_UNLIKELY(data.size() <= pos)) {
-    SCU_LOG_ERROR(_logger,
-                  "Invalid heartbeat data size for stream {}: expected at least 1 byte for range count, got {}",
-      _stream_number, data.size() - pos);
+    SCU_LOG_WARNING(_logger,
+                  "Invalid heartbeat data size for stream {}: expected at least 1 byte for range count, got {} "
+                  "- ignoring", _stream_number, data.size() - pos);
     return;
   }
   uint8_t range_count = data[pos++];
   if (SCU_UNLIKELY(!_stream_qos.is_reliable())) {
-    SCU_LOG_ERROR(_logger, "Received heartbeat for unreliable stream, which is not expected");
+    SCU_LOG_WARNING(_logger, "Received heartbeat for unreliable stream, which is not expected - ignoring");
     pos += (SCU_AS(size_t, range_count) * 2 + 1) * sizeof(SeqNumber);
     // TODO(@Igor): We probably want to send some error
     // close();
@@ -1726,7 +1726,8 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
   }
   SeqNumber end;
   if (SCU_UNLIKELY(!network_to_host(data, &end, pos))) {
-    SCU_LOG_ERROR(_logger, "Failed to parse end sequence number from heartbeat data for stream {}", _stream_number);
+    SCU_LOG_WARNING(_logger, "Failed to parse end sequence number from heartbeat data for stream {} - ignoring",
+                    _stream_number);
     return;
   }
   // Operation loses its atomicity, but it's ok since this is the only place where
@@ -1759,6 +1760,7 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
         return;
       }
       SCU_LOG_TRACE(_logger, "Resending packet with sequence number {} on stream {}", i, _stream_number);
+      _parent->_retransmission_count.fetch_add(1, std::memory_order_relaxed);
       if (SCU_UNLIKELY(!_parent->send(clone(*packet)))) {
         panic("Failed to resend packet (maybe connection or socket is closed?)");
         return;

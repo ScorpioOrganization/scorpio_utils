@@ -306,7 +306,7 @@ public:
    *
    * \return true if the channel is empty, false otherwise.
    */
-  constexpr SCU_ALWAYS_INLINE bool is_empty() const {
+  constexpr SCU_ALWAYS_INLINE bool is_empty() const noexcept {
     return _receive_waiter.count() <= 0;
   }
 
@@ -315,7 +315,7 @@ public:
    *
    * \return true if the channel is full, false otherwise.
    */
-  constexpr SCU_ALWAYS_INLINE bool is_full() const {
+  constexpr SCU_ALWAYS_INLINE bool is_full() const noexcept {
     return _send_waiter.count() <= 0;
   }
 
@@ -324,7 +324,7 @@ public:
    *
    * \return The number of items available to be received.
    */
-  constexpr SCU_ALWAYS_INLINE auto available() const {
+  constexpr SCU_ALWAYS_INLINE auto available() const noexcept {
     return _receive_waiter.count();
   }
 

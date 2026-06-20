@@ -131,8 +131,8 @@ struct Code {
   : value(v) { }
   constexpr Code(CodeType v)  // NOLINT
   : value(static_cast<Values>(v)) { }
-  constexpr operator CodeType() const noexcept {
-    return static_cast<CodeType>(value);
+  constexpr operator Values() const noexcept {
+    return value;
   }
   #define BITWISE_OPERATION(op) \
   constexpr Code operator op(const Code& other) const noexcept { \
@@ -287,6 +287,9 @@ public:
   SCU_ALWAYS_INLINE auto receive() {
     return _receive.receive<Wait>();
   }
+  SCU_ALWAYS_INLINE auto available_receives() const noexcept {
+    return _receive.available();
+  }
   bool close();
   SCU_ALWAYS_INLINE constexpr auto stream_id() const noexcept {
     return _stream_number;
@@ -349,10 +352,13 @@ private:
   std::atomic<bool> _stop;
   std::shared_ptr<TimeProvider> _time_provider;
   std::atomic<int64_t> _last_received_packet_time;
+  std::atomic<size_t> _received_packet_count;
+  std::atomic<int64_t> _last_received_heartbeat_time;
+  std::atomic<size_t> _received_heartbeat_count;
   std::mutex _panic_mutex;
   threading::Signal _start_signal;
   std::shared_ptr<logger::Logger> _logger;
-
+  std::atomic<size_t> _retransmission_count;
 
   uint16_t _next_stream_to_heartbeat;
   std::mutex _close_mutex;
@@ -419,7 +425,12 @@ public:
   SCU_ALWAYS_INLINE auto get_accepted_stream() {
     return _new_streams.receive<Wait>();
   }
-
+  SCU_ALWAYS_INLINE auto available_accepted_streams() const noexcept {
+    return _new_streams.available();
+  }
+  SCU_ALWAYS_INLINE auto available_incoming_packets() const noexcept {
+    return _incoming_packets.available();
+  }
   SCU_ALWAYS_INLINE auto is_auto_accept_stream() const noexcept {
     return _auto_accept_stream.load(std::memory_order_relaxed);
   }
@@ -448,7 +459,23 @@ public:
     return _state.load(std::memory_order_relaxed) <= State::CONNECTED;
   }
   SCU_ALWAYS_INLINE auto last_received_packet_time() const noexcept {
-    return _last_received_packet_time.load(std::memory_order_relaxed);
+    return _received_packet_count.load(std::memory_order_relaxed) != 0 ?
+           std::optional{ _last_received_packet_time.load(std::memory_order_relaxed) } :
+           std::nullopt;
+  }
+  SCU_ALWAYS_INLINE auto received_packet_count() const noexcept {
+    return _received_packet_count.load(std::memory_order_relaxed);
+  }
+  SCU_ALWAYS_INLINE auto last_heartbeat_time() const noexcept {
+    return _received_heartbeat_count.load(std::memory_order_relaxed) != 0 ?
+           std::optional{ _last_received_heartbeat_time.load(std::memory_order_relaxed) } :
+           std::nullopt;
+  }
+  SCU_ALWAYS_INLINE auto received_heartbeat_count() const noexcept {
+    return _received_heartbeat_count.load(std::memory_order_relaxed);
+  }
+  SCU_ALWAYS_INLINE auto retransmission_count() const noexcept {
+    return _retransmission_count.load(std::memory_order_relaxed);
   }
   SCU_ALWAYS_INLINE void set_logger(std::shared_ptr<logger::Logger> logger) noexcept {
     _logger = std::move(logger);
@@ -539,12 +566,26 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   }
 
 public:
+  static std::shared_ptr<TimeProvider> get_time_provider();
+
   SCU_ALWAYS_INLINE bool SCU_EAGER_SELECT_IS_READY() noexcept {
     return _new_connections && _new_connections->SCU_EAGER_SELECT_IS_READY();
   }
 
   SCU_ALWAYS_INLINE decltype(auto) SCU_EAGER_SELECT_GET_VALUE() noexcept {
     return _new_connections->SCU_EAGER_SELECT_GET_VALUE();
+  }
+
+  SCU_ALWAYS_INLINE auto available_new_connections() const noexcept {
+    return _new_connections ? _new_connections->available() : 0;
+  }
+
+  SCU_ALWAYS_INLINE auto available_incoming_packets() const noexcept {
+    return _receiver_channel.available();
+  }
+
+  SCU_ALWAYS_INLINE auto available_outgoing_packets() const noexcept {
+    return _sender_channel.available();
   }
 
   [[nodiscard]] static std::shared_ptr<ScorpioUdp> create(

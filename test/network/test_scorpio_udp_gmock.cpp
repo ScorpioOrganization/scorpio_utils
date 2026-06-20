@@ -36,14 +36,12 @@ using testing::AtMost;
 using testing::AtLeast;
 using testing::_;
 
-std::shared_ptr<scorpio_utils::testing::MockTimeProvider> get_time_provider();
-
 #define SOCKET_COMMON_SETUP \
   UdpSocket socket; \
   Ipv4 ip(4, 3, 2, 1); \
   Port port = 1234; \
   Signal stop; \
-  auto time_provider = get_time_provider(); \
+  auto time_provider = ScorpioUdp::get_time_provider(); \
   EXPECT_CALL(socket, open()) \
   .Times(1) \
   .WillOnce(Return(Success::instance())); \
