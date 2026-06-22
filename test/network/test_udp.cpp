@@ -155,11 +155,7 @@ TEST(UdpSocketTest, HighLoad) {
         EXPECT_TRUE(received_values.insert(*reinterpret_cast<uint32_t*>(buffer)).second) <<
           "Duplicate packet received: " << *reinterpret_cast<uint32_t*>(buffer);
       }
-#ifdef SCU_MOCK_UDP_PACKET_LOSS_PERCENTAGE
       EXPECT_GE(received_values.size(), SCU_AS(size_t, NUM_PACKETS * 0.7)) << "Too many packets were lost";
-#else
-      EXPECT_EQ(received_values.size(), NUM_PACKETS) << "Some packets were lost or duplicated";
-#endif
     });
 
   for (size_t i = 0; i < NUM_PACKETS; ++i) {

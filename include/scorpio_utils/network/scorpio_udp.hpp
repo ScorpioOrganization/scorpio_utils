@@ -270,6 +270,7 @@ private:
   bool append_heartbeat_data(std::vector<uint8_t>& heartbeat_data) const;
   void handle_heartbeat_data(const std::vector<uint8_t>& data, size_t& pos);
   void remove_expired_unreliable_data();
+  void activate_stream();
 
 public:
   SCU_ALWAYS_INLINE bool SCU_EAGER_SELECT_IS_READY() noexcept {
@@ -355,6 +356,8 @@ private:
   std::atomic<size_t> _received_packet_count;
   std::atomic<int64_t> _last_received_heartbeat_time;
   std::atomic<size_t> _received_heartbeat_count;
+  std::atomic<size_t> _send_heartbeat_count;
+  std::atomic<size_t> _send_partial_heartbeat_count;
   std::mutex _panic_mutex;
   threading::Signal _start_signal;
   std::shared_ptr<logger::Logger> _logger;
@@ -365,8 +368,14 @@ private:
   threading::Channel<std::shared_ptr<ScorpioUdpStream>, 1024> _new_streams;
   threading::Channel<std::pair<MessageHeader, UdpData>, 1024 * 1024> _incoming_packets;
   threading::Channel<std::shared_ptr<ScorpioUdpStream>, 1024> _awaiting_streams;
-  std::array<std::weak_ptr<ScorpioUdpStream>, std::numeric_limits<StreamNumber>::max() + 1> _streams;
-  std::array<std::atomic<bool>, std::numeric_limits<StreamNumber>::max() + 1> _stream_exists;
+  constexpr static size_t max_streams_count = std::numeric_limits<StreamNumber>::max() + 1;
+  // The fact that there is a second level of stream mask makes stream removal impossible
+  // to do without mutual exclusivity
+  std::mutex _streams_mask_write_mutex;
+  std::array<std::atomic<bool>, max_streams_count> _stream_exists;
+  std::array<std::atomic<uint64_t>, max_streams_count / (64 * 64)> _streams_mask_level_2;
+  std::array<std::atomic<uint64_t>, max_streams_count / 64> _streams_mask;
+  std::array<std::weak_ptr<ScorpioUdpStream>, max_streams_count> _streams;
   std::thread _processing_thread;
   bool connected();
   std::shared_ptr<ScorpioUdpStream> get_stream(StreamNumber);
@@ -473,6 +482,12 @@ public:
   }
   SCU_ALWAYS_INLINE auto received_heartbeat_count() const noexcept {
     return _received_heartbeat_count.load(std::memory_order_relaxed);
+  }
+  SCU_ALWAYS_INLINE auto send_partial_heartbeat_count() const noexcept {
+    return _send_partial_heartbeat_count.load(std::memory_order_relaxed);
+  }
+  SCU_ALWAYS_INLINE auto send_heartbeat_count() const noexcept {
+    return _send_heartbeat_count.load(std::memory_order_relaxed);
   }
   SCU_ALWAYS_INLINE auto retransmission_count() const noexcept {
     return _retransmission_count.load(std::memory_order_relaxed);

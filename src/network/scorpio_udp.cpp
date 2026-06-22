@@ -462,7 +462,8 @@ void ScorpioUdp::handle_connect_packet(const MessageHeader& header, const UdpDat
           send_or_panic(std::nullopt, _mock_sequence_number, Code::ERROR, udp_data.ip, udp_data.port,
             { }, "Failed to send ERROR response for ACCEPTED subcommand for connection with different connection_id");
         } else if (!connection->connected()) {
-          SCU_LOG_ERROR(_logger, "Received ACCEPTED for connection not in CONNECTING state. ip: {}, port: {}",
+          SCU_LOG_WARNING(_logger,
+                          "Received ACCEPTED for connection not in CONNECTING state. ip: {}, port: {} - ignoring",
             udp_data.ip.str(), udp_data.port);
           // TODO(@Igor): Handle error properly
         }
@@ -774,9 +775,15 @@ ScorpioUdpConnection::ScorpioUdpConnection(
   _stop(false),
   _time_provider(_parent->_time_provider),
   _last_received_packet_time(_time_provider->get_time()),
+  _received_packet_count{0},
+  _received_heartbeat_count{0},
+  _send_heartbeat_count{0},
+  _send_partial_heartbeat_count{0},
   _logger(_parent->_logger),
   _next_stream_to_heartbeat(0),
   _stream_exists{false},
+  _streams_mask_level_2{0},
+  _streams_mask{0},
   _processing_thread(&ScorpioUdpConnection::processing_thread, this) {
 }
 
@@ -850,7 +857,7 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
                   stream_number, *qos_opt, shared_from_this()));
             new_stream->_state.store(ScorpioUdpStream::State::CREATING, std::memory_order_relaxed);
             new_stream->connected();
-            _streams[stream_number] = new_stream;
+            new_stream->activate_stream();
             _new_streams.send<true>(std::move(new_stream));
             response_code = Code::CreateStreamSubCommands::ACCEPT;
             break;
@@ -875,27 +882,29 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
         auto stream = _streams[stream_number].lock();
         if (!stream) {
           // TODO(@Igor): Handle error properly
-          SCU_LOG_ERROR(_logger, "Received ACCEPT for non-existing stream number {}", stream_number);
+          SCU_LOG_WARNING(_logger, "Received ACCEPT for non-existing stream number {} - ignoring", stream_number);
           return;
         }
         if (!stream->is_alive()) {
           // TODO(@Igor): Handle error properly
-          SCU_LOG_ERROR(_logger, "Received ACCEPT for stream number {} not in CREATING state", stream_number);
+          SCU_LOG_WARNING(_logger, "Received ACCEPT for stream number {} not in CREATING state - ignoring",
+                          stream_number);
           return;
         }
         auto qos_opt = parse_qos(data.data, offset);
         if (!qos_opt) {
           // TODO(@Igor): Handle error properly
-          SCU_LOG_ERROR(_logger, "Failed to parse QoS from ACCEPT CREATE_STREAM packet for stream number {}",
+          SCU_LOG_WARNING(_logger,
+                          "Failed to parse QoS from ACCEPT CREATE_STREAM packet for stream number {} - ignoring",
             stream_number);
           return;
         }
         if (*qos_opt != stream->qos()) {
           // TODO(@Igor): Handle error properly
           stream->panic("Peer accepted stream with different QoS");
-          SCU_LOG_ERROR(_logger,
+          SCU_LOG_WARNING(_logger,
                         "Received ACCEPT for stream number {} with different QoS. "
-                        "Expected reliability: {}, got: {}. Expected depth: {}, got: {}",
+                        "Expected reliability: {}, got: {}. Expected depth: {}, got: {} - ignoring",
             stream_number, stream->qos().reliability, qos_opt->reliability,
             stream->qos().depth, qos_opt->depth);
           return;
@@ -1093,7 +1102,7 @@ void ScorpioUdpConnection::pull_awaiting_streams(std::shared_ptr<scorpio_utils::
   } else {
     stream->send_create_packet();
     stream->_state.store(ScorpioUdpStream::State::CREATING, std::memory_order_relaxed);
-    _streams[stream->_stream_number] = stream;
+    stream->activate_stream();
   }
 }
 
@@ -1113,36 +1122,82 @@ void ScorpioUdpConnection::send_heartbeat() {
   if (SCU_UNLIKELY(time_since_last_packet > SCU_UDP_TIMEOUT)) {
     panic("No packets received for 5 seconds");
   }
-  // *  - While giving streams some CPU time look only for active streams (not iterate while 65536 streams)
-  for (auto& weak_stream : _streams) {
-    if (auto stream = weak_stream.lock()) {
-      stream->update();
+  for (size_t l2 = 0; l2 < _streams_mask_level_2.size(); ++l2) {
+    if (!_streams_mask_level_2[l2]) {
+      continue;
+    }
+    for (size_t l1 = 0; l1 < 64; ++l1) {
+      const auto l1_idx = (l2 << 6) | l1;
+      if (!_streams_mask[l1_idx]) {
+        continue;
+      }
+      for (size_t i = 0; i < 64; ++i) {
+        const auto idx = (l1_idx << 6) | i;
+        if (auto stream = _streams[idx].lock()) {
+          stream->update();
+        }
+      }
     }
   }
   std::vector<uint8_t> heartbeat_data;
-  const auto first_stream = _next_stream_to_heartbeat;
-  std::shared_ptr<ScorpioUdpStream> first_handled;
   constexpr size_t packet_size = SCU_UDP_MAX_PACKET_SIZE - calculate_header_without_frames_left_size(Code::HEARTBEAT);
   heartbeat_data.reserve(packet_size);
-  do {
-    if (auto stream = _streams[_next_stream_to_heartbeat++].lock()) {
-      if (!stream->is_active()) {
-        if (stream == first_handled) {
-          break;
-        }
+  const auto l2_offset = SCU_AS(size_t, _next_stream_to_heartbeat) >> 12;
+  const auto l1_first_start = (SCU_AS(size_t, _next_stream_to_heartbeat) >> 6) & 63;
+  const auto idx_first_start = SCU_AS(size_t, _next_stream_to_heartbeat) & 63;
+  auto l1_start = l1_first_start;
+  auto idx_start = idx_first_start;
+  bool full = false;
+  for (size_t l2 = 0; l2 < _streams_mask_level_2.size(); ++l2) {
+    auto l2_idx = (l2 + l2_offset) % _streams_mask_level_2.size();
+    if (!_streams_mask_level_2[l2_idx]) {
+      continue;
+    }
+    for (size_t l1 = l1_start; l1 < 64; ++l1) {
+      const auto l1_idx = (l2_idx << 6) | l1;
+      if (!_streams_mask[l1_idx]) {
         continue;
       }
-      if (!first_handled) {
-        first_handled = stream;
-      } else if (stream == first_handled) {
-        break;
+      for (size_t i = idx_start; i < 64; ++i) {
+        const auto idx = (l1_idx << 6) | i;
+        if (auto stream = _streams[idx].lock()) {
+          if (stream->is_active() && !stream->append_heartbeat_data(heartbeat_data)) {
+            full = true;
+            _next_stream_to_heartbeat = SCU_AS(uint16_t, idx);
+            l1 = 64;
+            l2 = _streams_mask_level_2.size();
+            break;
+          }
+        }
       }
-      if (!stream->append_heartbeat_data(heartbeat_data) || _next_stream_to_heartbeat == first_stream) {
-        break;
+      idx_start = 0;
+    }
+    l1_start = 0;
+  }
+  if (!full) {
+    for (size_t l1 = 0; l1 <= l1_first_start && !full; ++l1) {
+      const auto l1_idx = (l2_offset << 6) | l1;
+      if (!_streams_mask[l1_idx]) {
+        continue;
+      }
+      const size_t i_end = (l1 == l1_first_start) ? idx_first_start : SCU_AS(size_t, 64);
+      for (size_t i = 0; i < i_end; ++i) {
+        const auto idx = (l1_idx << 6) | i;
+        if (auto stream = _streams[idx].lock()) {
+          if (stream->is_active() && !stream->append_heartbeat_data(heartbeat_data)) {
+            full = true;
+            _next_stream_to_heartbeat = SCU_AS(uint16_t, idx);
+            break;
+          }
+        }
       }
     }
-  } while (_next_stream_to_heartbeat != first_stream);
+  }
   send_or_panic(Code::HEARTBEAT, heartbeat_data);
+  _send_heartbeat_count.fetch_add(1, std::memory_order_relaxed);
+  if (full) {
+    _send_partial_heartbeat_count.fetch_add(1, std::memory_order_relaxed);
+  }
 }
 
 void ScorpioUdpConnection::processing_thread() {
@@ -1152,8 +1207,11 @@ void ScorpioUdpConnection::processing_thread() {
     std::shared_ptr<ScorpioUdpConnection> self;
     while (SCU_LIKELY((self = self_weak.lock()) && !_stop.load(std::memory_order_relaxed)) &&
       _state.load(std::memory_order_relaxed) == State::NEW) {
-      SCU_DEFER([&self] { self.reset(); });
+      self.reset();
       std::this_thread::sleep_for(std::chrono::nanoseconds(SCU_UDP_HEARTBEAT_PERIOD / 4));
+    }
+    if (SCU_UNLIKELY((self = self_weak.lock()) == nullptr || _stop.load(std::memory_order_relaxed))) {
+      return;
     }
     std::this_thread::sleep_for(std::chrono::nanoseconds(SCU_UDP_HEARTBEAT_PERIOD));
     {
@@ -1163,10 +1221,11 @@ void ScorpioUdpConnection::processing_thread() {
       size_t offset = 1;
       SCU_DO_AND_ASSERT(host_to_network(_connection_id, connect_data, offset),
         "Failed to convert connection ID to network format");
+      self.reset();
       while (SCU_LIKELY((self = self_weak.lock()) && !_stop.load(std::memory_order_relaxed)) &&
         _state.load(std::memory_order_relaxed) == State::CONNECTING) {
-        SCU_DEFER([&self] { self.reset(); });
         send_or_panic(Code::CONNECT, connect_data);
+        self.reset();
         std::this_thread::sleep_for(std::chrono::nanoseconds(SCU_UDP_HEARTBEAT_PERIOD));
       }
     }
@@ -1177,7 +1236,6 @@ void ScorpioUdpConnection::processing_thread() {
     self.reset();
     timeout.start();
     while (SCU_LIKELY((self = self_weak.lock()) && !_stop.load(std::memory_order_relaxed))) {
-      SCU_DEFER([&self] { self.reset(); });
       std::visit(VisitorOverloadingHelper{
         [this](std::pair<scorpio_utils::network::MessageHeader,
         scorpio_utils::network::UdpData> data) SCU_ALWAYS_INLINE_RAW {
@@ -1193,6 +1251,7 @@ void ScorpioUdpConnection::processing_thread() {
         timeout.reset();
         timeout.start();
       }
+      self.reset();
     }
   } catch (const PanicException&) {
   } catch (const threading::ClosedChannelException&) {
@@ -1271,9 +1330,21 @@ bool ScorpioUdpConnection::close(bool send_disconnect) {
     lock.lock();
     return false;
   }
-  for (auto& weak_stream : _streams) {
-    if (auto stream = weak_stream.lock()) {
-      stream->close();
+  for (size_t l2 = 0; l2 < _streams_mask_level_2.size(); ++l2) {
+    if (!_streams_mask_level_2[l2]) {
+      continue;
+    }
+    for (size_t l1 = 0; l1 < 64; ++l1) {
+      const auto l1_idx = (l2 << 6) | l1;
+      if (!_streams_mask[l1_idx]) {
+        continue;
+      }
+      for (size_t i = 0; i < 64; ++i) {
+        const auto idx = (l1_idx << 6) | i;
+        if (auto stream = _streams[idx].lock()) {
+          stream->close();
+        }
+      }
     }
   }
   SCU_LOG_INFO(_logger, "Closing connection {}:{}", _remote_ip.str(), _remote_port);
@@ -1349,14 +1420,40 @@ ScorpioUdpStream::ScorpioUdpStream(
 }
 
 ScorpioUdpStream::~ScorpioUdpStream() {
+  SCU_ASSERT(_parent->_stream_exists[_stream_number], "Stream existence was not claimed properly");
   close();
+  const size_t mask_index = _stream_number >> 6;
+  const size_t mask_position_mask = 1UL << (_stream_number & 63);
+  const size_t mask_level2_index = mask_index >> 6;
+  const size_t mask_level2_position_mask = 1UL << (mask_index & 63);
+  {
+    std::lock_guard lock(_parent->_streams_mask_write_mutex);
+    uint64_t current_state = _parent->_streams_mask[mask_index].load(std::memory_order_relaxed);
+    if ((current_state & ~mask_position_mask) == 0) {
+      current_state = _parent->_streams_mask_level_2[mask_level2_index].load(std::memory_order_relaxed);
+      do {
+        SCU_ASSERT(current_state & mask_level2_position_mask,
+         "Stream level 2 mask bit was already cleared on destruction");
+      } while (!_parent->_streams_mask_level_2[mask_level2_index].compare_exchange_weak(current_state,
+       current_state & ~mask_level2_position_mask,
+         std::memory_order_relaxed,
+         std::memory_order_relaxed));
+      current_state = _parent->_streams_mask[mask_index].load(std::memory_order_relaxed);
+    }
+    do {
+      SCU_ASSERT(current_state & mask_position_mask, "Stream mask bit was already cleared on destruction");
+    } while (!_parent->_streams_mask[mask_index].compare_exchange_weak(current_state,
+      current_state & ~mask_position_mask,
+        std::memory_order_relaxed,
+        std::memory_order_relaxed));
+  }
+  _parent->_streams[_stream_number].reset();
   bool expected = true;
-  SCU_DO_AND_ASSERT(_parent->_stream_exists[_stream_number].compare_exchange_strong(
-      expected,
-      false,
-      std::memory_order_relaxed,
-      std::memory_order_relaxed
-    ), "Stream existence flag was already false on destruction");
+  while (!_parent->_stream_exists[_stream_number].compare_exchange_weak(
+    expected,
+    false,
+    std::memory_order_relaxed,
+    std::memory_order_relaxed)) { }
 }
 
 bool ScorpioUdpStream::close() {
@@ -1772,4 +1869,29 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
     }
     greatest_seen_val = least_significant_bytes_to_val(begin_transformed, end);
   }
+}
+
+void ScorpioUdpStream::activate_stream() {
+  static_assert(sizeof(decltype(_parent->_streams_mask)::value_type) == sizeof(uint64_t),
+    "Streams mask must be 64-bit");
+  static_assert(sizeof(decltype(_parent->_streams_mask_level_2)::value_type) == sizeof(uint64_t),
+                "Streams mask must be 64-bit");
+  const size_t mask_index = _stream_number >> 6;
+  const size_t mask_position_mask = 1UL << (_stream_number & 63);
+  const size_t mask_level2_index = mask_index >> 6;
+  const size_t mask_level2_position_mask = 1UL << (mask_index & 63);
+  std::lock_guard lock(_parent->_streams_mask_write_mutex);
+  uint64_t current_state = _parent->_streams_mask[mask_index].load(std::memory_order_relaxed);
+  do {
+    SCU_ASSERT((current_state & mask_position_mask) == 0, "Stream mask bit is already set");
+  } while (!_parent->_streams_mask[mask_index].compare_exchange_weak(current_state,
+    current_state | mask_position_mask,
+      std::memory_order_relaxed,
+      std::memory_order_relaxed));
+  current_state = _parent->_streams_mask_level_2[mask_level2_index].load(std::memory_order_relaxed);
+  while (!_parent->_streams_mask_level_2[mask_level2_index].compare_exchange_weak(current_state,
+    current_state | mask_level2_position_mask,
+      std::memory_order_relaxed,
+      std::memory_order_relaxed)) { }
+  _parent->_streams[_stream_number] = weak_from_this();
 }
