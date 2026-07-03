@@ -95,7 +95,8 @@ void LocalizationConverter::ecef_to_geodetic(
 LocalizationConverter::LocalizationConverter(
   double lat_ref,
   double lon_ref,
-  double alt_ref_egm96
+  double alt_ref_egm96,
+  double azimuth_ref_deg
 )
 : _lat_ref(lat_ref),
   _lon_ref(lon_ref),
@@ -113,18 +114,35 @@ LocalizationConverter::LocalizationConverter(
   const double sin_lon = std::sin(lon_rad);
   const double cos_lon = std::cos(lon_rad);
 
-  // Rotation matrix from ECEF to ENU
-  _r11 = -sin_lon;
-  _r12 = cos_lon;
-  _r13 = 0.0;
+  const double enu_r11 = -sin_lon;
+  const double enu_r12 = cos_lon;
+  const double enu_r13 = 0.0;
 
-  _r21 = -sin_lat * cos_lon;
-  _r22 = -sin_lat * sin_lon;
-  _r23 = cos_lat;
+  const double enu_r21 = -sin_lat * cos_lon;
+  const double enu_r22 = -sin_lat * sin_lon;
+  const double enu_r23 = cos_lat;
 
-  _r31 = cos_lat * cos_lon;
-  _r32 = cos_lat * sin_lon;
-  _r33 = sin_lat;
+  const double enu_r31 = cos_lat * cos_lon;
+  const double enu_r32 = cos_lat * sin_lon;
+  const double enu_r33 = sin_lat;
+
+  // Build azimuth rotation matrix (clockwise around Up axis)
+  const double alpha_rad = azimuth_ref_deg * M_PI / 180.0;
+  const double cos_alpha = std::cos(alpha_rad);
+  const double sin_alpha = std::sin(alpha_rad);
+
+  // R = R_azimuth * R_enu
+  _r11 = cos_alpha * enu_r11 - sin_alpha * enu_r21;
+  _r12 = cos_alpha * enu_r12 - sin_alpha * enu_r22;
+  _r13 = cos_alpha * enu_r13 - sin_alpha * enu_r23;
+
+  _r21 = sin_alpha * enu_r11 + cos_alpha * enu_r21;
+  _r22 = sin_alpha * enu_r12 + cos_alpha * enu_r22;
+  _r23 = sin_alpha * enu_r13 + cos_alpha * enu_r23;
+
+  _r31 = enu_r31;
+  _r32 = enu_r32;
+  _r33 = enu_r33;
 }
 
 void LocalizationConverter::gps_to_local(

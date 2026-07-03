@@ -24,7 +24,8 @@ public:
   LocalizationConverter(
     double lat_ref,
     double lon_ref,
-    double alt_ref_egm96 = 0.0);
+    double alt_ref_egm96 = 0.0,
+    double azimuth_ref_deg = 0.0);
 
   void gps_to_local(
     double lat, double lon, double alt_egm96,
