@@ -52,7 +52,7 @@ private:
   double _y0_ecef;
   double _z0_ecef;
 
-  // Rotation matrix from ECEF to local ENU (East-North-Up)
+  // Rotation matrix from ECEF to local RFU (Right-Forward-Up)
   double _r11, _r12, _r13;
   double _r21, _r22, _r23;
   double _r31, _r32, _r33;

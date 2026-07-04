@@ -126,23 +126,23 @@ LocalizationConverter::LocalizationConverter(
   const double enu_r32 = cos_lat * sin_lon;
   const double enu_r33 = sin_lat;
 
-  // Build azimuth rotation matrix (clockwise around Up axis)
+  // Build azimuth rotation matrix (counter clockwise rotation matrix around Up-axis)
   const double alpha_rad = azimuth_ref_deg * M_PI / 180.0;
   const double cos_alpha = std::cos(alpha_rad);
   const double sin_alpha = std::sin(alpha_rad);
 
-  // R = R_azimuth * R_enu
-  _r11 = cos_alpha * enu_r11 - sin_alpha * enu_r21;
-  _r12 = cos_alpha * enu_r12 - sin_alpha * enu_r22;
-  _r13 = cos_alpha * enu_r13 - sin_alpha * enu_r23;
+  // R = R_azimuth * R_enu to get ECEF to RFU (Right-Forward-Up)
+    _r11 = cos_alpha * enu_r11 - sin_alpha * enu_r21;
+    _r12 = cos_alpha * enu_r12 - sin_alpha * enu_r22;
+    _r13 = cos_alpha * enu_r13 - sin_alpha * enu_r23;
 
-  _r21 = sin_alpha * enu_r11 + cos_alpha * enu_r21;
-  _r22 = sin_alpha * enu_r12 + cos_alpha * enu_r22;
-  _r23 = sin_alpha * enu_r13 + cos_alpha * enu_r23;
+    _r21 = sin_alpha * enu_r11 + cos_alpha * enu_r21;
+    _r22 = sin_alpha * enu_r12 + cos_alpha * enu_r22;
+    _r23 = sin_alpha * enu_r13 + cos_alpha * enu_r23;
 
-  _r31 = enu_r31;
-  _r32 = enu_r32;
-  _r33 = enu_r33;
+    _r31 = enu_r31;
+    _r32 = enu_r32;
+    _r33 = enu_r33;
 }
 
 void LocalizationConverter::gps_to_local(
@@ -159,14 +159,14 @@ void LocalizationConverter::gps_to_local(
   const double dy = y_ecef - _y0_ecef;
   const double dz = z_ecef - _z0_ecef;
 
-  // Rotate from ECEF to local ENU
-  const double e = _r11 * dx + _r12 * dy + _r13 * dz;
-  const double n = _r21 * dx + _r22 * dy + _r23 * dz;
+  // Rotate from ECEF to local RFU
+  const double r = _r11 * dx + _r12 * dy + _r13 * dz;
+  const double f = _r21 * dx + _r22 * dy + _r23 * dz;
   const double u = _r31 * dx + _r32 * dy + _r33 * dz;
 
-  // Output: x=East, y=North, z=Up
-  x = e;
-  y = n;
+  // Output: x=Right, y=Forward, z=Up
+  x = r;
+  y = f;
   z = u;
 }
 
@@ -174,15 +174,15 @@ void LocalizationConverter::local_to_gps(
   double x, double y, double z,
   double& lat, double& lon, double& alt_egm96
 ) const {
-  // Input: x=East, y=North, z=Up
-  const double e = x;
-  const double n = y;
+  // Input: x=Right, y=Forward, z=Up
+  const double r = x;
+  const double f = y;
   const double u = z;
 
-  // Rotate from local ENU to ECEF (transpose of rotation matrix)
-  const double dx = _r11 * e + _r21 * n + _r31 * u;
-  const double dy = _r12 * e + _r22 * n + _r32 * u;
-  const double dz = _r13 * e + _r23 * n + _r33 * u;
+  // Rotate from local RFU to ECEF (transpose of rotation matrix)
+  const double dx = _r11 * r + _r21 * f + _r31 * u;
+  const double dy = _r12 * r + _r22 * f + _r32 * u;
+  const double dz = _r13 * r + _r23 * f + _r33 * u;
 
   // Translate from reference point
   const double x_ecef = _x0_ecef + dx;
