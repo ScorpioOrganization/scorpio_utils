@@ -132,17 +132,17 @@ LocalizationConverter::LocalizationConverter(
   const double sin_alpha = std::sin(alpha_rad);
 
   // R = R_azimuth * R_enu to get ECEF to RFU (Right-Forward-Up)
-    _r11 = cos_alpha * enu_r11 - sin_alpha * enu_r21;
-    _r12 = cos_alpha * enu_r12 - sin_alpha * enu_r22;
-    _r13 = cos_alpha * enu_r13 - sin_alpha * enu_r23;
+  _r11 = cos_alpha * enu_r11 - sin_alpha * enu_r21;
+  _r12 = cos_alpha * enu_r12 - sin_alpha * enu_r22;
+  _r13 = cos_alpha * enu_r13 - sin_alpha * enu_r23;
 
-    _r21 = sin_alpha * enu_r11 + cos_alpha * enu_r21;
-    _r22 = sin_alpha * enu_r12 + cos_alpha * enu_r22;
-    _r23 = sin_alpha * enu_r13 + cos_alpha * enu_r23;
+  _r21 = sin_alpha * enu_r11 + cos_alpha * enu_r21;
+  _r22 = sin_alpha * enu_r12 + cos_alpha * enu_r22;
+  _r23 = sin_alpha * enu_r13 + cos_alpha * enu_r23;
 
-    _r31 = enu_r31;
-    _r32 = enu_r32;
-    _r33 = enu_r33;
+  _r31 = enu_r31;
+  _r32 = enu_r32;
+  _r33 = enu_r33;
 }
 
 void LocalizationConverter::gps_to_local(
