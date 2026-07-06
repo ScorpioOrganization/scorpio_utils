@@ -74,11 +74,15 @@ TEST(ScorpioUdp, BasicSend) {
       std::this_thread::sleep_for(std::chrono::milliseconds(400));
       auto connection = socket->get_accepted_connection();
       EXPECT_TRUE(connection.has_value());
+      EXPECT_FALSE(connection.value()->is_stream_slot_occupied(0));
+      EXPECT_FALSE(connection.value()->is_stream_slot_occupied(1));
       connection.value()->set_auto_accept_stream(true);
       EXPECT_EQ(connection.value()->state(), ScorpioUdpConnection::State::CONNECTED);
       std::this_thread::sleep_for(std::chrono::seconds(3));
       auto stream = connection.value()->get_accepted_stream();
       ASSERT_TRUE(stream.has_value());
+      EXPECT_FALSE(connection.value()->is_stream_slot_occupied(0));
+      EXPECT_TRUE(connection.value()->is_stream_slot_occupied(1));
       EXPECT_EQ(stream.value()->state(), ScorpioUdpStream::State::CREATED);
       std::this_thread::sleep_for(std::chrono::seconds(4));
       auto data = stream.value()->receive<false>();
@@ -97,8 +101,12 @@ TEST(ScorpioUdp, BasicSend) {
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
   EXPECT_EQ(connection->state(), ScorpioUdpConnection::State::CONNECTED);
   std::this_thread::sleep_for(std::chrono::seconds(1));
+  EXPECT_FALSE(connection->is_stream_slot_occupied(0));
+  EXPECT_FALSE(connection->is_stream_slot_occupied(1));
   const auto stream = connection->create_stream(1, { 0, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED });
   ASSERT_TRUE(stream);
+  EXPECT_FALSE(connection->is_stream_slot_occupied(0));
+  EXPECT_TRUE(connection->is_stream_slot_occupied(1));
   std::this_thread::sleep_for(std::chrono::seconds(2));
   EXPECT_EQ(connection->state(), ScorpioUdpConnection::State::CONNECTED);
   EXPECT_TRUE(stream->is_active());

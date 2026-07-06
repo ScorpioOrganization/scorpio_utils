@@ -504,6 +504,9 @@ public:
   SCU_ALWAYS_INLINE auto connection_id() const noexcept {
     return _connection_id;
   }
+  SCU_ALWAYS_INLINE auto is_stream_slot_occupied(StreamNumber stream_number) const noexcept {
+    return _stream_exists[stream_number].load(std::memory_order_relaxed);
+  }
 };
 
 class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
