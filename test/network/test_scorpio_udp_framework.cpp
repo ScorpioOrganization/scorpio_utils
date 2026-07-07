@@ -1831,6 +1831,90 @@ TEST_F(ScorpioUdpTester, reliable_stream_retransmits_beyond_depth_within_buffer)
   execute_test(events);
 }
 
+// Regression: a peer that misses the very FIRST packet (seq 0) must get it resent while it
+// is still in history. The old `i <= sat_sub(seq, size)` check reported seq 0 as "out of
+// resend history" from the start (sat_sub saturates to 0 before the buffer fills), so a lost
+// first packet on a young stream could never be recovered.
+TEST_F(ScorpioUdpTester, reliable_stream_retransmits_seq_zero_on_young_stream) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = create_outgoing_reliable_stream(events, connection_handle, 1, 16);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+
+  // Only a few packets sent -> the buffer is nowhere near full, so seq 0 is still retained.
+  std::vector<std::vector<uint8_t>> payloads = { { 0xA0 }, { 0xA1 }, { 0xA2 } };
+  for (auto& p : payloads) {
+    events.push_back({ WHERE, 0, stream_handle->stream_send(p) });
+  }
+  for (SeqNumber seq = 0; seq < 3; ++seq) {
+    events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+      stream_data_packet(1, seq, payloads[seq])) });
+  }
+
+  // Peer: next expected seq 0, holding [1, 3) -> it missed seq 0. It must be resent.
+  auto hb_body = generate_heartbeat_body(1, /*initial_end=*/ 0, /*held_ranges=*/ { { 1u, 3u } });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::HEARTBEAT, hb_body)) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    stream_data_packet(1, 0, payloads[0])) });
+  close_connection(events, connection_handle);
+  execute_test(events);
+}
+
+// Self-heal: if the peer stays stuck requesting a packet that has fallen out of resend
+// history (the "already out of resend history" warning), it can loop forever on a
+// reliable-ordered stream. After SCU_UDP_TIMEOUT of the SAME unrecoverable seq, the stream
+// must panic so the bridge can rebuild it -- but a single/transient occurrence must not.
+// (Relies on the shrunk SCU_UDP_QOS_DEPTH_SAFETY_BUFFER=8 for this target so the
+// out-of-history boundary is reachable in a handful of packets.)
+TEST_F(ScorpioUdpTester, reliable_stream_panics_when_peer_stuck_out_of_history) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  constexpr uint16_t kDepth = 1;  // buffer = depth + SAFETY_BUFFER(8) = 9
+  auto stream_handle = create_outgoing_reliable_stream(events, connection_handle, 1, kDepth);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+
+  // Push the sender past the buffer while ACKing so the send path never overflows:
+  // send seq 0..4, ACK up to 5, send seq 5..10 -> sequence_number = 11 (seq 1 + buffer 9 < 11).
+  auto send_range = [&](SeqNumber from, SeqNumber to) {
+    for (SeqNumber seq = from; seq < to; ++seq) {
+      events.push_back({ WHERE, 0, stream_handle->stream_send({ static_cast<uint8_t>(seq) }) });
+    }
+    events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  };
+  send_range(0, 5);
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::HEARTBEAT, generate_heartbeat_body(1, /*initial_end=*/ 5)) ) });
+  // Let the connection thread process the ACK (advance least-non-delivered) before sending
+  // the next batch, otherwise the send guard would see an un-acked backlog and overflow.
+  events.push_back({ WHERE, 0, std::make_unique<AdvanceTimeEvent>(TICK_TIME * 2) });
+  send_range(5, 11);
+
+  // Peer (falsely) reports missing seq 1 while holding [2, 11). seq 1 is out of history
+  // (current seq 11, buffer 9), so it can never be resent -> the unrecoverable stuck case.
+  auto stuck_hb = generate_single_packet(Code::HEARTBEAT,
+    generate_heartbeat_body(1, /*initial_end=*/ 1, /*held_ranges=*/ { { 2u, 11u } }));
+
+  // First occurrence: warns and starts the timer, but must NOT panic yet.
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345, stuck_hb) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_panic(false) });
+
+  // Re-send the same NACK every SCU_UDP_TIMEOUT/2 so the connection's own 5s silence
+  // timeout never trips; after the total exceeds SCU_UDP_TIMEOUT the stream must panic.
+  events.push_back({ WHERE, 0, std::make_unique<AdvanceTimeEvent>(SCU_UDP_TIMEOUT / 2) });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345, stuck_hb) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_panic(false) });  // ~2.5s: still tolerated
+  for (int i = 0; i < 2; ++i) {
+    events.push_back({ WHERE, 0, std::make_unique<AdvanceTimeEvent>(SCU_UDP_TIMEOUT / 2) });
+    events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345, stuck_hb) });
+  }
+  events.push_back({ WHERE, 0, stream_handle->stream_is_panic(true) });
+  // Tolerant teardown (a panicked stream still emits stray heartbeats); assert close succeeds
+  // rather than the exact DISCONNECT handshake packets.
+  events.push_back({ WHERE, 0, connection_handle->close_connection(true) });
+  execute_test(events);
+}
+
 // =====================================================================
 // Suite 5 — unreliable stream data
 // =====================================================================

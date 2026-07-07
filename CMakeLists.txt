@@ -258,6 +258,9 @@ if(BUILD_TESTING)
   target_compile_definitions(network_framework_test PRIVATE
     -DSCORPIO_UTILS_FRAMEWORK=1
     -DSCU_LOG_LEVEL=5
+    # Shrink the resend-history safety buffer so buffer-boundary behaviour (out-of-history
+    # resend requests, QoS-depth overflow) is reachable in a handful of packets under test.
+    -DSCU_UDP_QOS_DEPTH_SAFETY_BUFFER=8
   )
   target_include_directories(network_framework_test PRIVATE SYSTEM ${GMOCK_INCLUDE_DIRS})
   target_link_libraries(network_framework_test -fsanitize=address,undefined ${GMOCK_MAIN_LIBRARIES} ${GMOCK_LIBRARIES})

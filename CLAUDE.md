@@ -75,7 +75,7 @@ Compile-time tunables that govern ScorpioUDP behavior (override via `target_comp
 
 ```
 SCU_UDP_MAX_PACKET_SIZE              = 512
-SCU_UDP_QOS_DEPTH_SAFETY_BUFFER      = 2048
+SCU_UDP_QOS_DEPTH_SAFETY_BUFFER      = 4096
 SCU_UDP_UNRELIABLE_DATA_EXPIRY_NS    = 500'000'000
 SCU_UDP_HEARTBEAT_PERIOD             = 50'000'000  (ns)
 SCU_UDP_TIMEOUT                      = 5'000'000'000

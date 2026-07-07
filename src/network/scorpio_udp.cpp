@@ -1412,7 +1412,9 @@ ScorpioUdpStream::ScorpioUdpStream(
   _logger(_parent->_logger),
   _partial_data(std::in_place_index_t<0>{ }),
   _sequence_complement(0),
-  _last_greatest_sequence_number(0) {
+  _last_greatest_sequence_number(0),
+  _stuck_resend_seq(std::nullopt),
+  _stuck_resend_since(0) {
   SCU_ASSERT(stream_qos.is_reliable() || stream_qos.depth == 0, "Unreliable streams must have depth 0 (no ordering)");
   if (!stream_qos.is_reliable()) {
     _partial_data.emplace<1>();
@@ -1837,6 +1839,8 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
   std::atomic_thread_fence(std::memory_order_acquire);
   std::lock_guard lock(_sent_history_mutex);
   auto sequence_number = _sequence_number.load(std::memory_order_relaxed);
+  // Lowest seq (if any) the peer asked to resend that has fallen out of history this pass.
+  std::optional<size_t> stuck_resend_seq;
   while (range_count--) {
     if (SCU_UNLIKELY(!network_to_host(data, &begin, pos))) {
       SCU_LOG_ERROR(_logger, "Failed to parse begin sequence number from heartbeat data for stream {}", _stream_number);
@@ -1844,7 +1848,15 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
     }
     const auto begin_transformed = least_significant_bytes_to_val(greatest_seen_val, begin);
     for (auto i = least_significant_bytes_to_val(greatest_seen_val, end); i < begin_transformed; ++i) {
-      if (i <= sat_sub(sequence_number, _sent_history.size())) {
+      // Packet i is gone from history only once it has been pushed out of the ring buffer,
+      // i.e. more than _sent_history.size() newer packets have been sent. Written as an
+      // addition (not sat_sub) so it is correct at the boundary and while the buffer is not
+      // yet full - in particular seq 0 stays resendable until it is genuinely overwritten
+      // (the old `i <= sat_sub(seq, size)` reported seq 0 as lost from the very first packet).
+      if (i + _sent_history.size() < sequence_number) {
+        if (!stuck_resend_seq.has_value()) {
+          stuck_resend_seq = i;
+        }
         SCU_LOG_WARNING(_logger,
                         "Peer expects resend of packet with sequence number {} on stream {}, "
                         "but it's already out of resend history",
@@ -1868,6 +1880,27 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
       return;
     }
     greatest_seen_val = least_significant_bytes_to_val(begin_transformed, end);
+  }
+  // Self-heal: an unrecoverable resend request (packet gone from history) can loop
+  // forever on a reliable-ordered stream. Tolerate transient occurrences, but if the peer
+  // stays stuck on the same seq for SCU_UDP_TIMEOUT, panic the stream so it gets rebuilt.
+  if (stuck_resend_seq.has_value()) {
+    const auto now = _parent->_time_provider->get_time();
+    if (_stuck_resend_seq == stuck_resend_seq) {
+      if (now - _stuck_resend_since >= SCU_UDP_TIMEOUT) {
+        SCU_LOG_WARNING(_logger,
+                        "Peer has been requesting resend of sequence number {} on stream {} that is out of "
+                        "resend history for over {}s - panicking stream to force recovery",
+          *stuck_resend_seq, _stream_number, SCU_UDP_TIMEOUT / 1'000'000'000);
+        panic("Peer stuck requesting a packet that is no longer in resend history");
+        return;
+      }
+    } else {
+      _stuck_resend_seq = stuck_resend_seq;
+      _stuck_resend_since = now;
+    }
+  } else {
+    _stuck_resend_seq.reset();
   }
 }
 
