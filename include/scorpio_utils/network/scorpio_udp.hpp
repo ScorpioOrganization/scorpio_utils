@@ -40,7 +40,9 @@
 #endif
 
 #define SCU_UDP_MAX_PACKET_SIZE (512)
-#define SCU_UDP_QOS_DEPTH_SAFETY_BUFFER (2048)
+#ifndef SCU_UDP_QOS_DEPTH_SAFETY_BUFFER
+#define SCU_UDP_QOS_DEPTH_SAFETY_BUFFER (4096)
+#endif
 #define SCU_UDP_UNRELIABLE_DATA_EXPIRY_NS (500'000'000)  // 500 milliseconds
 #define SCU_UDP_HEARTBEAT_PERIOD (50'000'000)
 #define SCU_UDP_TIMEOUT (5'000'000'000)
@@ -249,6 +251,11 @@ private:
   std::variant<std::vector<uint8_t>, UnreliablePartialData> _partial_data;
   SeqNumberComplement _sequence_complement;
   SeqNumber _last_greatest_sequence_number;
+  // Debounce for unrecoverable resend requests: when the peer keeps asking for a packet
+  // that has fallen out of _sent_history, we track which seq and since when. If it stays
+  // stuck on the same seq for SCU_UDP_TIMEOUT, the stream is panicked so it can be rebuilt.
+  std::optional<size_t> _stuck_resend_seq;
+  int64_t _stuck_resend_since;
   std::string _panic_message;
   std::mutex _panic_mutex;
 

@@ -403,4 +403,4 @@ On the receive side:
 | `SCU_UDP_TIMEOUT` | 5 s | No-packet timeout before disconnect |
 | `SCU_UDP_CREATE_RETRY_PERIOD` | 5 s | Stream creation give-up timeout (CREATE retried every heartbeat until this elapses) |
 | `SCU_UDP_UNRELIABLE_DATA_EXPIRY_NS` | 500 ms | Expiry for incomplete unreliable fragments |
-| `SCU_UDP_QOS_DEPTH_SAFETY_BUFFER` | 2048 | Extra history slots beyond QoS depth |
+| `SCU_UDP_QOS_DEPTH_SAFETY_BUFFER` | 4096 | Extra history slots beyond QoS depth |
