@@ -1844,7 +1844,7 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
     }
     const auto begin_transformed = least_significant_bytes_to_val(greatest_seen_val, begin);
     for (auto i = least_significant_bytes_to_val(greatest_seen_val, end); i < begin_transformed; ++i) {
-      if (i <= sat_sub(sequence_number, _stream_qos.depth_value())) {
+      if (i <= sat_sub(sequence_number, _sent_history.size())) {
         SCU_LOG_WARNING(_logger,
                         "Peer expects resend of packet with sequence number {} on stream {}, "
                         "but it's already out of resend history",

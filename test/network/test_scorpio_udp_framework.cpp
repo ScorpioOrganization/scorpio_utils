@@ -1788,6 +1788,49 @@ TEST_F(ScorpioUdpTester, reliable_stream_heartbeat_no_gap_no_retransmission) {
   execute_test(events);
 }
 
+// Regression: the resend window must span the whole _sent_history ring buffer
+// (depth + SCU_UDP_QOS_DEPTH_SAFETY_BUFFER), not just `depth`. A packet older than
+// `depth` but still physically in the buffer must be retransmitted on NACK. Before
+// the fix this logged "already out of resend history" and dropped the packet, which
+// permanently wedged RELIABLE_ORDERED streams (e.g. the bridge signalling stream)
+// when loss struck during a burst larger than `depth`.
+TEST_F(ScorpioUdpTester, reliable_stream_retransmits_beyond_depth_within_buffer) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  // Small depth so a modest burst easily exceeds it while staying well inside the
+  // depth + SCU_UDP_QOS_DEPTH_SAFETY_BUFFER ring buffer.
+  constexpr uint16_t kDepth = 8;
+  auto stream_handle = create_outgoing_reliable_stream(events, connection_handle, 1, kDepth);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+
+  // Send more packets than `depth` (seq 0..11). The send path is bounded by the full
+  // buffer size, not depth, so this stays below the QoS-depth panic threshold.
+  constexpr SeqNumber kSent = 12;
+  static_assert(kSent > kDepth, "must send more than depth to exercise the beyond-depth path");
+  std::vector<std::vector<uint8_t>> payloads;
+  for (SeqNumber seq = 0; seq < kSent; ++seq) {
+    payloads.push_back({ static_cast<uint8_t>(0xA0 + seq), static_cast<uint8_t>(seq) });
+  }
+  for (auto& p : payloads) {
+    events.push_back({ WHERE, 0, stream_handle->stream_send(p) });
+  }
+  for (SeqNumber seq = 0; seq < kSent; ++seq) {
+    events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+      stream_data_packet(1, seq, payloads[seq])) });
+  }
+
+  // Peer heartbeat: delivered up to seq 1, holding [2, kSent) -> only seq 1 is missing.
+  // seq 1 is far older than `depth` (current seq is kSent) yet well within the buffer,
+  // so the sender must still resend it instead of declaring it out of history.
+  auto hb_body = generate_heartbeat_body(1, /*initial_end=*/ 1, /*held_ranges=*/ { { 2u, kSent } });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::HEARTBEAT, hb_body)) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    stream_data_packet(1, 1, payloads[1])) });
+  close_connection(events, connection_handle);
+  execute_test(events);
+}
+
 // =====================================================================
 // Suite 5 — unreliable stream data
 // =====================================================================
