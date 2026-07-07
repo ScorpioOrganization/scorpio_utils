@@ -1877,11 +1877,11 @@ TEST_F(ScorpioUdpTester, reliable_stream_panics_when_peer_stuck_out_of_history) 
   // Push the sender past the buffer while ACKing so the send path never overflows:
   // send seq 0..4, ACK up to 5, send seq 5..10 -> sequence_number = 11 (seq 1 + buffer 9 < 11).
   auto send_range = [&](SeqNumber from, SeqNumber to) {
-    for (SeqNumber seq = from; seq < to; ++seq) {
-      events.push_back({ WHERE, 0, stream_handle->stream_send({ static_cast<uint8_t>(seq) }) });
-    }
-    events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
-  };
+      for (SeqNumber seq = from; seq < to; ++seq) {
+        events.push_back({ WHERE, 0, stream_handle->stream_send({ static_cast<uint8_t>(seq) }) });
+      }
+      events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+    };
   send_range(0, 5);
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
     generate_single_packet(Code::HEARTBEAT, generate_heartbeat_body(1, /*initial_end=*/ 5)) ) });
