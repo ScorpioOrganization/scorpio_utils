@@ -58,8 +58,7 @@ SCU_HOT SCU_CONST_FUNC constexpr size_t packets_count(size_t data_size, size_t h
 
 SCU_CONST_FUNC constexpr size_t calculate_header_without_frames_left_size(Code code) {
   return sizeof(CodeType) +
-         (code.is_connectionless() ? 0 : sizeof(SeqNumber)) +
-         (code.is_command_for_stream() ? sizeof(StreamNumber) : 0);
+         (code.is_command_for_stream() ? (sizeof(SeqNumber) + sizeof(StreamNumber)) : 0);
 }
 
 SCU_HOT SCU_PURE static scorpio_utils::Expected<MessageHeader, std::string> parse_header(
