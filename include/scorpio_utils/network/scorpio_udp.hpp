@@ -61,6 +61,7 @@ using SeqNumberComplement = uint32_t;
 using StreamNumber = uint16_t;
 using FramesLeft = uint16_t;
 using ConnectionId = uint64_t;
+using StreamEpoch = uint8_t;
 
 #ifdef SCU_UDP_MOCK
 using TimeProvider = scorpio_utils::testing::MockTimeProvider;
@@ -228,6 +229,7 @@ private:
   friend class ScorpioUdpConnection;
   threading::Channel<std::vector<uint8_t>, 1024 * 1024> _receive;
   const StreamNumber _stream_number;
+  const StreamEpoch _stream_epoch;
   const StreamQoS _stream_qos;
   const int64_t _creation_time;
   std::mutex _sent_history_mutex;
@@ -264,7 +266,7 @@ private:
   void send_create_packet();
   bool send_close_packet();
   ScorpioUdpStream(
-    StreamNumber stream_number, StreamQoS stream_qos,
+    StreamNumber stream_number, StreamEpoch stream_epoch, StreamQoS stream_qos,
     std::shared_ptr<ScorpioUdpConnection> parent);
 
   bool send(Code code, const std::vector<uint8_t>& data);
@@ -383,6 +385,7 @@ private:
   std::array<std::atomic<uint64_t>, max_streams_count / (64 * 64)> _streams_mask_level_2;
   std::array<std::atomic<uint64_t>, max_streams_count / 64> _streams_mask;
   std::array<std::weak_ptr<ScorpioUdpStream>, max_streams_count> _streams;
+  std::array<StreamEpoch, max_streams_count> _streams_epoch;
   std::thread _processing_thread;
   bool connected();
   std::shared_ptr<ScorpioUdpStream> get_stream(StreamNumber);
@@ -403,7 +406,8 @@ private:
   void panic_soft(std::string&& message);
   auto generate_packets(
     Code code, const std::vector<uint8_t>& data, std::optional<StreamNumber> stream_number = std::nullopt,
-    std::optional<std::reference_wrapper<std::atomic<size_t>>> sequence_number = std::nullopt);
+    std::optional<std::reference_wrapper<std::atomic<size_t>>> sequence_number = std::nullopt,
+    std::optional<StreamEpoch> stream_epoch = std::nullopt);
   bool send(
     Code code, const std::vector<uint8_t>& data, std::optional<StreamNumber> stream_number = std::nullopt,
     std::optional<std::reference_wrapper<std::atomic<size_t>>> sequence_number = std::nullopt);
@@ -671,5 +675,6 @@ std::optional<std::pair<size_t, std::vector<std::vector<uint8_t>>>> generate_pac
   std::optional<scorpio_utils::network::StreamNumber> stream_number,
   std::atomic<size_t>& sequence_number,
   scorpio_utils::network::Code code,
-  const std::vector<uint8_t>& data);
+  const std::vector<uint8_t>& data,
+  std::optional<scorpio_utils::network::StreamEpoch> stream_epoch = std::nullopt);
 #endif

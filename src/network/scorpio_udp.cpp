@@ -36,6 +36,7 @@ using scorpio_utils::network::SeqNumber;
 using scorpio_utils::network::StreamNumber;
 using scorpio_utils::network::UdpData;
 using scorpio_utils::network::TimeProvider;
+using scorpio_utils::network::StreamEpoch;
 
 static_assert(sizeof(Code::ConnectSubCommands) == 1, "ConnectSubCommands size is assumed to be 1 byte");
 static_assert(sizeof(Code::DisconnectSubCommands) == 1, "DisconnectSubCommands size is assumed to be 1 byte");
@@ -652,9 +653,11 @@ SCU_HOT std::optional<std::pair<size_t, std::vector<std::vector<uint8_t>>>> gene
   std::optional<scorpio_utils::network::StreamNumber> stream_number,
   std::atomic<size_t>& sequence_number,
   scorpio_utils::network::Code code,
-  const std::vector<uint8_t>& data) {
+  const std::vector<uint8_t>& data,
+  const std::optional<StreamEpoch> stream_epoch) {
   using scorpio_utils::network::host_to_network;
-  const auto header_without_frames_left_size = calculate_header_without_frames_left_size(code);
+  const auto header_without_frames_left_size = calculate_header_without_frames_left_size(code) +
+    (sizeof(StreamEpoch) * SCU_AS(size_t, stream_epoch.has_value()));
   const auto packets_to_send = packets_count(data.size(), header_without_frames_left_size);
   if (SCU_UNLIKELY(packets_to_send > 65537)) {
     // SCU_LOG_ERROR(_logger, "Data is too large to send: {} bytes, max is {} bytes",
@@ -665,14 +668,13 @@ SCU_HOT std::optional<std::pair<size_t, std::vector<std::vector<uint8_t>>>> gene
   packets.reserve(packets_to_send);
   SCU_ASSERT(code.is_command_for_stream() == stream_number.has_value(),
     "Stream number must be provided for stream command and must not be provided for non-stream command");
-  size_t current = 0;
   const auto first_packet_seq =
     SCU_AS(SeqNumber, sequence_number.fetch_add(packets_to_send, std::memory_order_relaxed));
   auto packet_seq = first_packet_seq;
   size_t packet_pos = 0;
   packets.emplace_back();
   auto generate_header =
-    [&packets, &packet_pos, &packet_seq, stream_number, code, first = true](
+    [&packets, &packet_pos, &packet_seq, stream_number, code, stream_epoch, first = true](
     bool last = false) mutable -> void {
       auto code_v = (last ? (code & ~Code(Code::NOT_LAST)) : code | Code(Code::NOT_LAST));
       if (first) {
@@ -690,6 +692,7 @@ SCU_HOT std::optional<std::pair<size_t, std::vector<std::vector<uint8_t>>>> gene
     };
   const auto packet_size_without_frames_left = SCU_UDP_MAX_PACKET_SIZE - header_without_frames_left_size;
   const auto packet_size_with_frames_left = packet_size_without_frames_left - sizeof(FramesLeft);
+  size_t current = 0;
   while (data.size() - current > packet_size_without_frames_left) {
     packets.back().resize(SCU_UDP_MAX_PACKET_SIZE);
     generate_header();
@@ -699,6 +702,10 @@ SCU_HOT std::optional<std::pair<size_t, std::vector<std::vector<uint8_t>>>> gene
       // panic("Failed to convert frames left to network format");
       return std::nullopt;
     }
+    if (stream_epoch.has_value()) {
+      SCU_DO_AND_ASSERT(host_to_network(*stream_epoch, packets.back(), packet_pos),
+            "Failed to convert stream epoch to network format");
+    }
     SCU_ASSERT(packet_pos + packet_size_with_frames_left == packets.back().size(),
       "Packet size miscalculation: " << packet_pos << " + " << packet_size_with_frames_left << " == " <<
       packets.back().size());
@@ -707,10 +714,12 @@ SCU_HOT std::optional<std::pair<size_t, std::vector<std::vector<uint8_t>>>> gene
     current += packet_size_with_frames_left;
     packet_pos = 0;
   }
-  packets.back().resize(sizeof(Code::Values) +
-    (code.is_command_for_stream() ? sizeof(SeqNumber) + sizeof(StreamNumber) : 0) +
-    (data.size() - current));
+  packets.back().resize(header_without_frames_left_size + (data.size() - current));
   generate_header(true);
+  if (stream_epoch.has_value()) {
+    SCU_DO_AND_ASSERT(host_to_network(*stream_epoch, packets.back(), packet_pos),
+            "Failed to convert stream epoch to network format");
+  }
   std::memcpy(packets.back().data() + packet_pos, data.data() + current, data.size() - current);
   return { { first_packet_seq, packets } };
 }
@@ -723,7 +732,7 @@ bool ScorpioUdp::send(
   Port remote_port,
   const std::vector<uint8_t>& data
 ) {
-  auto packets = generate_packets(stream_number, sequence_number, code, data);
+  auto packets = generate_packets(stream_number, sequence_number, code, data, std::nullopt);
   if (SCU_UNLIKELY(!packets.has_value())) {
     return false;
   }
@@ -784,6 +793,15 @@ ScorpioUdpConnection::ScorpioUdpConnection(
   _stream_exists{false},
   _streams_mask_level_2{0},
   _streams_mask{0},
+  _streams_epoch{[this]() {
+      std::array<uint64_t, max_streams_count / (sizeof(uint64_t) / sizeof(StreamEpoch))> arr64;
+      for (auto& epoch : arr64) {
+        epoch = static_cast<uint64_t>(_parent->get_random_number());
+      }
+      std::array<StreamEpoch, max_streams_count> arr;
+      std::memcpy(arr.data(), arr64.data(), sizeof(arr));
+      return arr;
+    }()},
   _processing_thread(&ScorpioUdpConnection::processing_thread, this) {
 }
 
@@ -825,6 +843,12 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
           SCU_LOG_ERROR(_logger, "Failed to parse CREATE_STREAM stream number");
           return;
         }
+        StreamEpoch stream_epoch;
+        if (!network_to_host(data.data, &stream_epoch, offset)) {
+          // TODO(@Igor): Handle error properly
+          SCU_LOG_WARNING(_logger, "Failed to parse CREATE_STREAM stream epoch");
+          return;
+        }
         auto qos_opt = parse_qos(data.data, offset);
         if (!qos_opt) {
           // TODO(@Igor): Handle error properly
@@ -853,8 +877,9 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
               true,
               std::memory_order_relaxed,
               std::memory_order_relaxed)) {
+            _streams_epoch[stream_number] = stream_epoch;
             std::shared_ptr<ScorpioUdpStream> new_stream(new ScorpioUdpStream(
-                  stream_number, *qos_opt, shared_from_this()));
+                  stream_number, stream_epoch, *qos_opt, shared_from_this()));
             new_stream->_state.store(ScorpioUdpStream::State::CREATING, std::memory_order_relaxed);
             new_stream->connected();
             new_stream->activate_stream();
@@ -891,6 +916,12 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
                           stream_number);
           return;
         }
+        StreamEpoch stream_epoch;
+        if (!network_to_host(data.data, &stream_epoch, offset)) {
+          // TODO(@Igor): Handle error properly
+          SCU_LOG_WARNING(_logger, "Failed to parse CREATE_STREAM stream epoch");
+          return;
+        }
         auto qos_opt = parse_qos(data.data, offset);
         if (!qos_opt) {
           // TODO(@Igor): Handle error properly
@@ -909,16 +940,109 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
             stream->qos().depth, qos_opt->depth);
           return;
         }
+        if (stream->_stream_epoch != stream_epoch) {
+          // TODO(@Igor): Handle error properly
+          stream->panic("Peer accepted stream with different epoch");
+          SCU_LOG_WARNING(_logger,
+                        "Received ACCEPT for stream number {} with different epoch. "
+                        "Expected epoch: {}, got: {} - ignoring",
+            stream_number, stream->_stream_epoch, stream_epoch);
+          return;
+        }
         stream->connected();
       } break;
-    case Code::CreateStreamSubCommands::REJECT_SIMILAR_EXISTED:
-      [[fallthrough]];
+    case Code::CreateStreamSubCommands::REJECT_SIMILAR_EXISTED: {
+        StreamNumber stream_number;
+        if (!network_to_host(data.data, &stream_number, offset)) {
+          // TODO(@Igor): Handle error properly
+          SCU_LOG_ERROR(_logger, "Failed to parse stream number from REJECT_SIMILAR_EXISTED CREATE_STREAM packet");
+          return;
+        }
+        StreamEpoch stream_epoch;
+        if (!network_to_host(data.data, &stream_epoch, offset)) {
+          // TODO(@Igor): Handle error properly
+          SCU_LOG_WARNING(_logger, "Failed to parse CREATE_STREAM stream epoch");
+          return;
+        }
+        auto qos_opt = parse_qos(data.data, offset);
+        if (!qos_opt) {
+          // TODO(@Igor): Handle error properly
+          SCU_LOG_ERROR(_logger,
+                        "Failed to parse QoS from REJECT_SIMILAR_EXISTED CREATE_STREAM packet for stream number {}",
+                      stream_number);
+          return;
+        }
+        if (auto stream = _streams[stream_number].lock()) {
+          if (!stream->is_alive()) {
+            SCU_LOG_ERROR(_logger, "Received REJECT_SIMILAR_EXISTED for stream number {} not in CREATING state",
+                          stream_number);
+            return;
+          }
+          if (stream->_stream_epoch != stream_epoch) {
+            SCU_LOG_ERROR(_logger,
+                          "Received REJECT_SIMILAR_EXISTED for stream number {} with different epoch. "
+                          "Expected epoch: {}, got: {}",
+              stream_number, stream->_stream_epoch, stream_epoch);
+            return;
+          }
+          if (*qos_opt != stream->qos()) {
+            SCU_LOG_ERROR(_logger,
+                          "Received REJECT_SIMILAR_EXISTED for stream number {} with different QoS. "
+                          "Expected reliability: {}, got: {}. Expected depth: {}, got: {}",
+              stream_number, stream->qos().reliability, qos_opt->reliability,
+              stream->qos().depth, qos_opt->depth);
+            return;
+          }
+          stream->panic("Peer rejected stream creation due to similar existing stream");
+        } else {
+          SCU_LOG_WARNING(_logger, "Received REJECT_SIMILAR_EXISTED for non-existing stream - ignoring");
+        }
+      } break;
     case Code::CreateStreamSubCommands::ALREADY_EXISTS: {
         StreamNumber stream_number;
         if (!network_to_host(data.data, &stream_number, offset)) {
           // TODO(@Igor): Handle error properly
           SCU_LOG_ERROR(_logger, "Failed to parse stream number from ALREADY_EXISTS CREATE_STREAM packet");
           return;
+        }
+        StreamEpoch stream_epoch;
+        if (!network_to_host(data.data, &stream_epoch, offset)) {
+          // TODO(@Igor): Handle error properly
+          SCU_LOG_WARNING(_logger, "Failed to parse CREATE_STREAM stream epoch");
+          return;
+        }
+        auto qos_opt = parse_qos(data.data, offset);
+        if (!qos_opt) {
+          // TODO(@Igor): Handle error properly
+          SCU_LOG_ERROR(_logger, "Failed to parse QoS from ALREADY_EXISTS CREATE_STREAM packet for stream number {}",
+                        stream_number);
+          return;
+        }
+        if (auto stream = _streams[stream_number].lock()) {
+          if (!stream->is_alive()) {
+            SCU_LOG_ERROR(_logger, "Received ALREADY_EXISTS for stream number {} not in CREATING state", stream_number);
+            return;
+          }
+          if (*qos_opt != stream->qos()) {
+            SCU_LOG_ERROR(_logger,
+                          "Received ALREADY_EXISTS for stream number {} with different QoS. "
+                          "Expected reliability: {}, got: {}. Expected depth: {}, got: {}",
+              stream_number, stream->qos().reliability, qos_opt->reliability,
+              stream->qos().depth, qos_opt->depth);
+            return;
+          }
+          if (stream->_stream_epoch != stream_epoch) {
+            SCU_LOG_ERROR(_logger,
+                          "Received ALREADY_EXISTS for stream number {} with different epoch. "
+                          "Expected epoch: {}, got: {}",
+              stream_number, stream->_stream_epoch, stream_epoch);
+            return;
+          }
+          if (stream->state() == ScorpioUdpStream::State::CREATING) {
+            stream->connected();
+          }
+        } else {
+          SCU_LOG_ERROR(_logger, "Received ALREADY_EXISTS for non-existing stream number {}", stream_number);
         }
       } break;
     default: {
@@ -941,6 +1065,12 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
           SCU_LOG_ERROR(_logger, "Received REJECT for stream number {} not in CREATING state", stream_number);
           return;
         }
+        StreamEpoch stream_epoch;
+        if (!network_to_host(data.data, &stream_epoch, offset)) {
+          // TODO(@Igor): Handle error properly
+          SCU_LOG_WARNING(_logger, "Failed to parse CREATE_STREAM stream epoch");
+          return;
+        }
         auto qos_opt = parse_qos(data.data, offset);
         if (!qos_opt) {
           SCU_LOG_ERROR(_logger, "Failed to parse QoS from REJECT CREATE_STREAM packet for stream number {}",
@@ -953,6 +1083,13 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
                         "Expected reliability: {}, got: {}. Expected depth: {}, got: {}",
             stream_number, stream->qos().reliability, qos_opt->reliability,
             stream->qos().depth, qos_opt->depth);
+          return;
+        }
+        if (stream->_stream_epoch != stream_epoch) {
+          SCU_LOG_ERROR(_logger,
+                        "Received REJECT for stream number {} with different epoch. "
+                        "Expected epoch: {}, got: {}",
+            stream_number, stream->_stream_epoch, stream_epoch);
           return;
         }
         SCU_LOG_INFO(_logger, "Stream number {} was rejected by peer", stream_number);
@@ -1288,12 +1425,14 @@ SCU_COLD SCU_NORETURN void ScorpioUdpConnection::panic(std::string&& message) {
 
 auto ScorpioUdpConnection::generate_packets(
   Code code, const std::vector<uint8_t>& data, std::optional<StreamNumber> stream_number,
-  std::optional<std::reference_wrapper<std::atomic<size_t>>> sequence_number) {
+  std::optional<std::reference_wrapper<std::atomic<size_t>>> sequence_number,
+  std::optional<StreamEpoch> stream_epoch) {
   return ::generate_packets(
         stream_number,
         sequence_number ? sequence_number->get() : _sequence_number,
         code,
-        data);
+        data,
+        stream_epoch);
 }
 
 bool ScorpioUdpConnection::send(
@@ -1389,7 +1528,8 @@ std::shared_ptr<ScorpioUdpStream> ScorpioUdpConnection::create_stream(
   if (!qos.is_reliable() && qos.depth != 0) {
     qos.depth = 0;
   }
-  std::shared_ptr<ScorpioUdpStream> stream(new ScorpioUdpStream(stream_id, qos, shared_from_this()));
+  std::shared_ptr<ScorpioUdpStream> stream(new ScorpioUdpStream(stream_id, _streams_epoch[stream_id]++, qos,
+    shared_from_this()));
   _awaiting_streams.send<true>(stream);
   return stream;
 }
@@ -1397,9 +1537,10 @@ std::shared_ptr<ScorpioUdpStream> ScorpioUdpConnection::create_stream(
 // ========================= ScorpioUdpStream implementation ===========================
 
 ScorpioUdpStream::ScorpioUdpStream(
-  StreamNumber stream_number, StreamQoS stream_qos,
+  StreamNumber stream_number, StreamEpoch stream_epoch, StreamQoS stream_qos,
   std::shared_ptr<ScorpioUdpConnection> parent)
 : _stream_number(stream_number),
+  _stream_epoch(stream_epoch),
   _stream_qos(stream_qos),
   _creation_time(parent->_time_provider->get_time()),
   _sent_history(stream_qos.is_reliable() ? stream_qos.depth_value() + SCU_UDP_QOS_DEPTH_SAFETY_BUFFER : 0),
@@ -1485,7 +1626,8 @@ SCU_HOT bool ScorpioUdpStream::send(Code code, const std::vector<uint8_t>& data)
     code,
     data,
     _stream_number,
-    _sequence_number
+    _sequence_number,
+    (_stream_qos.is_reliable() && code == Code::STREAM_DATA) ? std::optional<StreamEpoch>(_stream_epoch) : std::nullopt
   );
   if (SCU_UNLIKELY(!packets.has_value())) {
     SCU_LOG_ERROR(_logger, "Failed to generate packets for sending {} bytes on stream {}",
@@ -1540,13 +1682,15 @@ SCU_COLD void ScorpioUdpStream::panic(std::string&& message) {
 void ScorpioUdpStream::send_create_packet() {
   std::vector<uint8_t> packet;
   constexpr auto minimal_size = sizeof(Code::CreateStreamSubCommands) + sizeof(StreamNumber) +
-    sizeof(StreamQoS::Reliability);
+    sizeof(StreamQoS::Reliability) + sizeof(StreamEpoch);
   packet.reserve(minimal_size + sizeof(StreamQoS::depth));
   packet.resize(minimal_size);
   packet[0] = AS_BYTE(Code::CreateStreamSubCommands::CREATE);
   size_t offset = 1;
   SCU_DO_AND_ASSERT(host_to_network(_stream_number, packet,
                                        offset), "Failed to convert stream number to network format");
+  SCU_DO_AND_ASSERT(host_to_network(_stream_epoch, packet,
+                                       offset), "Failed to convert stream epoch to network format");
   serialize_qos(_stream_qos, packet, offset);
   _parent->send_or_panic(Code::CREATE_STREAM, packet, "Failed to send CREATE_STREAM command");
 }
@@ -1574,11 +1718,13 @@ bool ScorpioUdpStream::closed() {
 
 bool ScorpioUdpStream::send_close_packet() {
   std::vector<uint8_t> packet;
-  packet.resize(3);
+  packet.resize(sizeof(Code::CloseStreamSubCommands) + sizeof(StreamNumber) + sizeof(StreamEpoch));
   packet[0] = AS_BYTE(Code::CloseStreamSubCommands::CLOSE);
   size_t offset = 1;
   SCU_DO_AND_ASSERT(host_to_network<StreamNumber>(_stream_number, packet,
                                        offset), "Failed to convert stream number to network format");
+  SCU_DO_AND_ASSERT(host_to_network<StreamEpoch>(_stream_epoch, packet,
+                                       offset), "Failed to convert stream epoch to network format");
   return send(Code::CLOSE_STREAM, packet);
 }
 
@@ -1623,6 +1769,17 @@ void ScorpioUdpStream::remove_expired_unreliable_data() {
 
 void ScorpioUdpStream::handle_data_packet(const MessageHeader& header, UdpData&& data) {
   if (_stream_qos.is_reliable()) {
+    StreamEpoch packet_epoch;
+    auto offset = header.data_offset;
+    if (SCU_UNLIKELY(!network_to_host(data.data, &packet_epoch, offset))) {
+      SCU_LOG_ERROR(_logger, "Failed to parse stream epoch from STREAM_DATA packet");
+      return;
+    }
+    if (SCU_UNLIKELY(packet_epoch != _stream_epoch)) {
+      SCU_LOG_ERROR(_logger, "Received STREAM_DATA packet with unexpected stream epoch: {}. Expected: {}",
+        packet_epoch, _stream_epoch);
+      return;
+    }
     const auto seq_number = get_packet_number(header.seq_number.value());
     SCU_LOG_TRACE(_logger, "Processing ordered packet on stream {}: seq {}", _stream_number, seq_number);
     switch (_orderer.add(seq_number, { header, std::move(data.data) })) {
@@ -1642,7 +1799,7 @@ void ScorpioUdpStream::handle_data_packet(const MessageHeader& header, UdpData&&
       }
       std::ignore = partial_data.insert(
         partial_data.end(),
-        packet_opt->second.begin() + SCU_AS(int64_t, packet_opt->first.data_offset),
+        packet_opt->second.begin() + SCU_AS(int64_t, packet_opt->first.data_offset) + sizeof(StreamEpoch),
         packet_opt->second.end());
       if (!packet_opt->first.frames_left.has_value()) {
         std::vector<uint8_t> complete_data;
