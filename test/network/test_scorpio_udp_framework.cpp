@@ -151,16 +151,22 @@ auto stream_data_packet(
   return generate_single_packet(Code::STREAM_DATA, data, seq, stream_id, stream_epoch);
 }
 
-// CREATE_STREAM payload: subcommand, stream id, then the stream epoch, then QoS.
-// The epoch sits between stream id and QoS on the wire for CREATE and every
-// response (ACCEPT/REJECT/REJECT_SIMILAR_EXISTED/ALREADY_EXISTS).
+// CREATE_STREAM payload: subcommand, the 8-byte connection id, stream id, the
+// stream epoch, then QoS. The connection id sits right after the subcommand
+// (matching CONNECT/DISCONNECT); the epoch sits between stream id and QoS. All
+// of CREATE and every response (ACCEPT/REJECT/REJECT_SIMILAR_EXISTED/
+// ALREADY_EXISTS) carry the same layout. connection_id defaults to
+// TEST_PEER_CONNECTION_ID because the shared create_connection() helper
+// establishes its connection with that id.
 std::vector<uint8_t> create_stream_payload(
   StreamNumber stream_id,
   ScorpioUdpStream::StreamQoS qos,
   Code::CreateStreamSubCommands subcommand = Code::CreateStreamSubCommands::CREATE,
-  StreamEpoch stream_epoch = TEST_STREAM_EPOCH) {
+  StreamEpoch stream_epoch = TEST_STREAM_EPOCH,
+  ConnectionId connection_id = TEST_PEER_CONNECTION_ID) {
   std::vector<uint8_t> payload;
   payload.push_back(static_cast<uint8_t>(subcommand));
+  write_be64(payload, connection_id);
   write_be16(payload, stream_id);
   payload.push_back(static_cast<uint8_t>(stream_epoch));
   payload.push_back(static_cast<uint8_t>(qos.reliability));
@@ -170,19 +176,20 @@ std::vector<uint8_t> create_stream_payload(
   return payload;
 }
 
-// CLOSE_STREAM payload: subcommand + stream id, plus the epoch when set. Only a
-// locally-initiated CLOSE carries the epoch (send_close_packet); peer->us CLOSE
-// and the CLOSED/ALREADY_CLOSED replies stay 3 bytes to match
-// close_stream_packet_handler, so those callers pass std::nullopt.
+// CLOSE_STREAM payload: subcommand + 8-byte connection id + stream id + stream
+// epoch, for CLOSE and every reply (CLOSED/ALREADY_CLOSED). The receiver drops
+// frames whose connection id mismatches and verifies the epoch, so all callers
+// carry both. connection_id/stream_epoch default to the values the shared
+// create_connection() helper and peer-created streams use.
 std::vector<uint8_t> close_stream_payload(
   StreamNumber stream_id, Code::CloseStreamSubCommands subcommand,
-  std::optional<StreamEpoch> stream_epoch = std::nullopt) {
+  StreamEpoch stream_epoch = TEST_STREAM_EPOCH,
+  ConnectionId connection_id = TEST_PEER_CONNECTION_ID) {
   std::vector<uint8_t> payload;
   payload.push_back(static_cast<uint8_t>(subcommand));
+  write_be64(payload, connection_id);
   write_be16(payload, stream_id);
-  if (stream_epoch.has_value()) {
-    payload.push_back(static_cast<uint8_t>(*stream_epoch));
-  }
+  payload.push_back(static_cast<uint8_t>(stream_epoch));
   return payload;
 }
 class EventInTime {
@@ -547,6 +554,73 @@ public:
            std::to_string(_data.size()) + " bytes)";
   }
   ~ExpectPacketAnySeqTimeout() override = default;
+};
+
+// Like ExpectPacketAnySeqTimeout but ALSO ignores the trailing stream-epoch byte.
+// Used for the heartbeat-driven CLOSE_STREAM:ALREADY_CLOSED emitted for a stream
+// we never created: heartbeat_packet_handler tags it with the connection's stored
+// _streams_epoch[stream] slot, a random per-connection value the test can't predict.
+class ExpectClosePacketAnyEpochTimeout final : public EventInTime {
+  const Ipv4 _remote_ip;
+  const Port _remote_port;
+  const std::vector<uint8_t> _data;
+  const int64_t _period;
+  const size_t _max_attempts;
+
+  static bool matches(const std::vector<uint8_t>& got, const std::vector<uint8_t>& want) {
+    // Layout: code(1) stream_number(2) seq(4) subcommand(1) connid(8) streamid(2) epoch(1).
+    // Compare code + header stream_number [0..3) and payload up to the epoch
+    // [7..end-1); skip seq [3..7) and the trailing epoch byte.
+    if (got.size() != want.size() || want.size() < 8) {
+      return got == want;
+    }
+    return std::equal(got.begin(), got.begin() + 3, want.begin()) &&
+           std::equal(got.begin() + 7, got.end() - 1, want.begin() + 7);
+  }
+
+public:
+  ExpectClosePacketAnyEpochTimeout(
+    Ipv4 remote_ip, Port remote_port, std::vector<uint8_t> data,
+    int64_t period = TICK_TIME, size_t max_attempts = 20)
+  : _remote_ip(remote_ip), _remote_port(remote_port), _data(std::move(data)),
+    _period(period), _max_attempts(max_attempts) { }
+
+  Expected<Success, std::string> execute(
+    int64_t,
+    UdpSocket& socket,
+    std::shared_ptr<ScorpioUdp>
+  ) override {
+    const auto time_provider = ScorpioUdp::get_time_provider();
+    for (size_t attempt = 0; attempt < _max_attempts; ++attempt) {
+      while (auto result = socket.get_from_send_queue<false>()) {
+        auto [ip, port, data] = *std::move(result);
+        if (is_background_packet(data, _data)) {
+          continue;
+        }
+        if (SCU_UNLIKELY(ip != _remote_ip)) {
+          return Unexpected("Expected remote IP "s + _remote_ip.str() + " but got " +
+            std::to_string(ip.ip()));
+        }
+        if (SCU_UNLIKELY(port != _remote_port)) {
+          return Unexpected("Expected remote port " + std::to_string(_remote_port) +
+            " but got " + std::to_string(port));
+        }
+        if (SCU_UNLIKELY(!matches(data, _data))) {
+          return Unexpected("Expected data " + packet_to_string(_data) + " but got " + packet_to_string(data));
+        }
+        return Success();
+      }
+      time_provider->advance_time(_period);
+      std::this_thread::sleep_for(std::chrono::nanoseconds(_period));
+    }
+    return Unexpected("No packet received after "s + std::to_string(_max_attempts) +
+      " attempts (period=" + std::to_string(_period) + "ns)");
+  }
+  std::string name() override {
+    return "ExpectClosePacketAnyEpochTimeout(" + _remote_ip.str() + ":" + std::to_string(_remote_port) + ", " +
+           std::to_string(_data.size()) + " bytes)";
+  }
+  ~ExpectClosePacketAnyEpochTimeout() override = default;
 };
 
 class AdvanceTimeEvent final : public EventInTime {
@@ -1360,11 +1434,11 @@ public:
       const auto connection = _handle->get_connection();
       const auto stream_id = stream->stream_id();
       const auto qos = stream->qos();
-      // CREATE_STREAM wire layout: code(1) + subcommand(1) + stream_number(2) +
-      // epoch(1) + qos. CREATE_STREAM is not a stream command, so no seq is
-      // written into the header (the epoch is at a fixed offset).
+      // CREATE_STREAM wire layout: code(1) + subcommand(1) + connection_id(8) +
+      // stream_number(2) + epoch(1) + qos. CREATE_STREAM is not a stream command,
+      // so no seq is written into the header (the epoch is at a fixed offset).
       constexpr size_t epoch_offset =
-        1 + sizeof(Code::CreateStreamSubCommands) + sizeof(StreamNumber);
+        1 + sizeof(Code::CreateStreamSubCommands) + sizeof(ConnectionId) + sizeof(StreamNumber);
       // is_background_packet must not treat the CREATE we are hunting for as
       // background noise; hand it a CREATE-shaped probe so it still drains
       // heartbeats/connect retransmits but stops on our CREATE.
@@ -1391,7 +1465,8 @@ public:
           const auto epoch = static_cast<StreamEpoch>(data[epoch_offset]);
           const auto expected = generate_single_packet(
             Code::CREATE_STREAM,
-            create_stream_payload(stream_id, qos, Code::CreateStreamSubCommands::CREATE, epoch));
+            create_stream_payload(stream_id, qos, Code::CreateStreamSubCommands::CREATE, epoch,
+              connection->connection_id()));
           if (SCU_UNLIKELY(data != expected)) {
             return Unexpected("Expected CREATE_STREAM "s + packet_to_string(expected) +
               " but got " + packet_to_string(data));
@@ -1441,7 +1516,8 @@ public:
       const auto connection = _handle->get_connection();
       auto packet = generate_single_packet(
         Code::CREATE_STREAM,
-        create_stream_payload(stream->stream_id(), stream->qos(), _subcommand, *_handle->_captured_epoch));
+        create_stream_payload(stream->stream_id(), stream->qos(), _subcommand, *_handle->_captured_epoch,
+          connection->connection_id()));
       const Expected<UdpMessageInfo, std::string> info{
         { packet.size(), connection->remote_ip(), connection->remote_port() } };
       socket.add_to_receive_queue<true>(info, std::move(packet));
@@ -1615,12 +1691,25 @@ protected:
   }
 };
 
+// Establishes a connection with a KNOWN id: the peer initiates CONNECT carrying
+// TEST_PEER_CONNECTION_ID and the local (auto-accepting) side adopts it. Streams
+// on this connection therefore carry TEST_PEER_CONNECTION_ID, which is the
+// default connection id baked into create_stream_payload / close_stream_payload.
+// Tests that specifically need the local side to be the connection initiator
+// drive the connect flow directly instead (see
+// reconnect_same_address_before_disconnect_accept).
 auto create_connection(std::vector<EventQueueItem>& events) {
   std::shared_ptr<ConnectionHandle> connection_handle = ConnectionHandle::create();
   events.push_back({ WHERE, 0, std::make_unique<StartScorpioUdp>() });
-  events.push_back({ WHERE, 0, connection_handle->create_connection(Ipv4(127, 0, 0, 1), 12345) });
-  events.push_back({ WHERE, 0, connection_handle->expect_connect(Code::ConnectSubCommands::CONNECT) });
-  events.push_back({ WHERE, 0, connection_handle->send_connect(Code::ConnectSubCommands::ACCEPTED) });
+  events.push_back({ WHERE, 0, std::make_unique<StartListening>(Ipv4(127, 0, 0, 1), 10001) });
+  events.push_back({ WHERE, 0, std::make_unique<SetAutoAccept>(true) });
+  events.push_back({ WHERE, TICK_TIME, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CONNECT,
+      id_payload(AS_BYTE(Code::ConnectSubCommands::CONNECT), TEST_PEER_CONNECTION_ID))) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CONNECT,
+      id_payload(AS_BYTE(Code::ConnectSubCommands::ACCEPTED), TEST_PEER_CONNECTION_ID))) });
+  events.push_back({ WHERE, 0, connection_handle->get_connection(true) });
   events.push_back({ WHERE, 0, connection_handle->connection_is_alive(true) });
   return connection_handle;
 }
@@ -1642,8 +1731,15 @@ TEST_F(ScorpioUdpTester, reconnect_same_address_before_disconnect_accept) {
   const Ipv4 peer(127, 0, 0, 1);
   const Port port = 12345;
 
-  // conn1: outgoing connect + handshake (helper uses the same 127.0.0.1:12345).
-  auto conn1 = create_connection(events);
+  // conn1: outgoing connect + handshake. This test needs the local side to be the
+  // connection initiator, so it drives the connect flow directly rather than using
+  // create_connection() (which now uses the accept flow with a fixed peer id).
+  auto conn1 = ConnectionHandle::create();
+  events.push_back({ WHERE, 0, std::make_unique<StartScorpioUdp>() });
+  events.push_back({ WHERE, 0, conn1->create_connection(peer, port) });
+  events.push_back({ WHERE, 0, conn1->expect_connect(Code::ConnectSubCommands::CONNECT) });
+  events.push_back({ WHERE, 0, conn1->send_connect(Code::ConnectSubCommands::ACCEPTED) });
+  events.push_back({ WHERE, 0, conn1->connection_is_alive(true) });
 
   // create_connection only asserts is_alive(), which is already satisfied in the
   // CONNECTING state, so conn1's injected CONNECT/ACCEPTED may still be sitting
@@ -1717,10 +1813,11 @@ TEST_F(ScorpioUdpTester, accept_connection_and_get_stream) {
   auto connection_handle = create_connection(events);
   std::shared_ptr<StreamHandle> stream_handle = StreamHandle::create(connection_handle);
   events.push_back({ WHERE, 0, connection_handle->connection_auto_accept_streams(true) });
+  const ScorpioUdpStream::StreamQoS create_qos{ 0, ScorpioUdpStream::StreamQoS::Reliability::UNRELIABLE };
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
   generate_single_packet(Code::CREATE_STREAM,
-      // subcommand, stream_number(0x0100), epoch, reliability(UNRELIABLE)
-      { AS_BYTE(Code::CreateStreamSubCommands::CREATE), 0x01, 0x00, AS_BYTE(TEST_STREAM_EPOCH), 0x00 })) });
+      // subcommand, connection id, stream_number(0x0100 = 256), epoch, reliability(UNRELIABLE)
+      create_stream_payload(256, create_qos, Code::CreateStreamSubCommands::CREATE))) });
   events.push_back({ WHERE, TICK_TIME, std::make_unique<SleepEvent>(TICK_TIME) });
   events.push_back({ WHERE, TICK_TIME, stream_handle->get_stream(true) });
   execute_test(events);
@@ -2330,12 +2427,11 @@ TEST_F(ScorpioUdpTester, heartbeat_nonexistent_stream_sends_already_closed) {
   write_be32(hb_body, 0);  // initial_end
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
     generate_single_packet(Code::HEARTBEAT, hb_body)) });
-  std::vector<uint8_t> close_body;
-  close_body.reserve(3);
-  close_body.emplace_back(AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED));
-  write_be16(close_body, static_cast<uint16_t>(99));
-  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketAnySeqTimeout>(Ipv4(127, 0, 0, 1), 12345,
-    generate_single_packet(Code::CLOSE_STREAM, close_body, 0, 99)) });
+  // Stream 99 was never created, so heartbeat_packet_handler tags the ALREADY_CLOSED
+  // with a random _streams_epoch[99] slot value; match everything but the epoch byte.
+  events.push_back({ WHERE, 0, std::make_unique<ExpectClosePacketAnyEpochTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CLOSE_STREAM,
+      close_stream_payload(99, Code::CloseStreamSubCommands::ALREADY_CLOSED, /*epoch=*/ 0), 0, 99)) });
   close_connection(events, connection_handle);
   execute_test(events);
 }
@@ -2389,12 +2485,11 @@ TEST_F(ScorpioUdpTester, heartbeat_nonexistent_stream_between_retransmit_streams
     generate_single_packet(Code::HEARTBEAT, hb_body)) });
 
   events.push_back({ WHERE, 0, stream_a->expect_stream_data(1, payloads_a[1]) });
-  std::vector<uint8_t> close_body;
-  close_body.reserve(3);
-  close_body.emplace_back(AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED));
-  write_be16(close_body, static_cast<uint16_t>(99));
-  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketAnySeqTimeout>(Ipv4(127, 0, 0, 1), 12345,
-    generate_single_packet(Code::CLOSE_STREAM, close_body, 0, 99)) });
+  // Stream 99 was never created, so heartbeat_packet_handler tags the ALREADY_CLOSED
+  // with a random _streams_epoch[99] slot value; match everything but the epoch byte.
+  events.push_back({ WHERE, 0, std::make_unique<ExpectClosePacketAnyEpochTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    generate_single_packet(Code::CLOSE_STREAM,
+      close_stream_payload(99, Code::CloseStreamSubCommands::ALREADY_CLOSED, /*epoch=*/ 0), 0, 99)) });
   events.push_back({ WHERE, 0, stream_b->expect_stream_data(1, payloads_b[1]) });
 
   close_connection(events, connection_handle);

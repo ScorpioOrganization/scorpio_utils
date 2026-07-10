@@ -833,7 +833,21 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
     return;
   }
   size_t offset = header.data_offset;
-  switch (SCU_AS(Code::CreateStreamSubCommands, data.data[offset++])) {
+  const auto subcommand = SCU_AS(Code::CreateStreamSubCommands, data.data[offset++]);
+  ConnectionId connection_id;
+  if (!network_to_host(data.data, &connection_id, offset)) {
+    // TODO(@Igor): Handle error properly
+    SCU_LOG_ERROR(_logger, "Failed to parse connection_id from CREATE_STREAM packet");
+    return;
+  }
+  if (connection_id != _connection_id) {
+    SCU_LOG_ERROR(_logger,
+      "Dropping CREATE_STREAM packet with mismatched connection_id. ip: {}, port: {}, "
+      "existing connection_id: {}, received connection_id: {}",
+      _remote_ip.str(), _remote_port, _connection_id, connection_id);
+    return;
+  }
+  switch (subcommand) {
     case Code::CreateStreamSubCommands::CREATE: {
         Code::CreateStreamSubCommands response_code;
         StreamNumber stream_number;
@@ -1045,8 +1059,7 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
         }
       } break;
     default: {
-        SCU_LOG_ERROR(_logger, "Received unknown CREATE_STREAM packet with subcommand: {}",
-        static_cast<Code::CreateStreamSubCommands>(data.data[offset - 1]));
+        SCU_LOG_ERROR(_logger, "Received unknown CREATE_STREAM packet with subcommand: {}", subcommand);
         [[fallthrough]];
       }
     case Code::CreateStreamSubCommands::REJECT: {
@@ -1098,56 +1111,78 @@ void ScorpioUdpConnection::create_stream_packet_handler(const MessageHeader& hea
 }
 
 void ScorpioUdpConnection::close_stream_packet_handler(const MessageHeader& header, UdpData&& data) {
-  if (data.data.size() - header.data_offset != sizeof(Code::CloseStreamSubCommands) + sizeof(StreamNumber)) {
+  if (data.data.size() - header.data_offset !=
+    sizeof(Code::CloseStreamSubCommands) + sizeof(ConnectionId) + sizeof(StreamNumber) + sizeof(StreamEpoch)) {
     SCU_LOG_ERROR(_logger,
       "Invalid CLOSE_STREAM packet size: expected {} bytes, got {} bytes",
-      sizeof(Code::CloseStreamSubCommands) + sizeof(StreamNumber),
+      sizeof(Code::CloseStreamSubCommands) + sizeof(ConnectionId) + sizeof(StreamNumber) + sizeof(StreamEpoch),
       data.data.size() - header.data_offset);
     return;
   }
   size_t offset = header.data_offset;
-  Code::CloseStreamSubCommands subcode;
-  subcode = SCU_AS(Code::CloseStreamSubCommands, data.data[offset++]);
+  const Code::CloseStreamSubCommands subcode = SCU_AS(Code::CloseStreamSubCommands, data.data[offset++]);
+  ConnectionId connection_id;
+  if (!network_to_host(data.data, &connection_id, offset)) {
+    SCU_LOG_ERROR(_logger, "Failed to parse connection_id from CLOSE_STREAM packet");
+    return;
+  }
+  if (connection_id != _connection_id) {
+    SCU_LOG_ERROR(_logger,
+      "Dropping CLOSE_STREAM packet with mismatched connection_id. ip: {}, port: {}, "
+      "existing connection_id: {}, received connection_id: {}",
+      _remote_ip.str(), _remote_port, _connection_id, connection_id);
+    return;
+  }
   StreamNumber stream_number;
   if (!network_to_host(data.data, &stream_number, offset)) {
     SCU_LOG_ERROR(_logger, "Failed to parse stream number from CLOSE_STREAM packet");
     return;
   }
+  StreamEpoch stream_epoch;
+  if (!network_to_host(data.data, &stream_epoch, offset)) {
+    SCU_LOG_ERROR(_logger, "Failed to parse stream epoch from CLOSE_STREAM packet");
+    return;
+  }
   auto stream = get_stream(stream_number);
+  const bool epoch_matches = stream && stream->_stream_epoch == stream_epoch;
   switch (subcode) {
     case Code::CloseStreamSubCommands::CLOSE: {
-        std::vector<uint8_t> response;
-        size_t response_offset = 1;
-        response.reserve(3);
-        if (!stream) {
-          response.emplace_back(AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED));
-        } else {
+        Code::CloseStreamSubCommands response_code = Code::CloseStreamSubCommands::ALREADY_CLOSED;
+        if (epoch_matches) {
           ScorpioUdpStream::State expected = stream->state();
+          bool closed_now = false;
           while (stream->is_alive()) {
             if (stream->_state.compare_exchange_strong(
                 expected,
                 ScorpioUdpStream::State::CLOSED,
                 std::memory_order_relaxed,
                 std::memory_order_relaxed)) {
-              response.emplace_back(AS_BYTE(Code::CloseStreamSubCommands::CLOSED));
+              closed_now = true;
             }
           }
-          if (response.empty()) {
-            response.emplace_back(AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED));
-          }
+          response_code = closed_now ? Code::CloseStreamSubCommands::CLOSED :
+            Code::CloseStreamSubCommands::ALREADY_CLOSED;
         }
-        response.resize(3);
+        std::vector<uint8_t> response;
+        response.resize(sizeof(Code::CloseStreamSubCommands) + sizeof(ConnectionId) + sizeof(StreamNumber) +
+          sizeof(StreamEpoch));
+        response[0] = AS_BYTE(response_code);
+        size_t response_offset = 1;
+        SCU_DO_AND_ASSERT(host_to_network(connection_id, response, response_offset),
+          "Failed to convert connection ID to network format for CLOSE_STREAM response");
         SCU_DO_AND_ASSERT(host_to_network<StreamNumber>(stream_number, response,
                                                  response_offset), "Failed to convert stream number to network format");
+        SCU_DO_AND_ASSERT(host_to_network<StreamEpoch>(stream_epoch, response,
+                                                 response_offset), "Failed to convert stream epoch to network format");
         send(Code::CLOSE_STREAM, response, stream_number);
       } break;
     case Code::CloseStreamSubCommands::CLOSED: {
-        if (stream) {
+        if (epoch_matches) {
           std::ignore = stream->closed();
         }
       } break;
     case Code::CloseStreamSubCommands::ALREADY_CLOSED: {
-        if (stream) {
+        if (epoch_matches) {
           stream->_state.store(ScorpioUdpStream::State::CLOSING, std::memory_order_relaxed);
           SCU_DO_AND_ASSERT(stream->closed(), "Failed to close stream in response to ALREADY_CLOSED");
         }
@@ -1170,12 +1205,16 @@ void ScorpioUdpConnection::heartbeat_packet_handler(const MessageHeader& header,
     } else {
       SCU_LOG_DEBUG(_logger, "Received heartbeat data for non-existing stream number {}", stream_num);
       std::vector<uint8_t> response;
-      response.reserve(3);
-      response.emplace_back(AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED));
+      response.resize(sizeof(Code::CloseStreamSubCommands) + sizeof(ConnectionId) + sizeof(StreamNumber) +
+        sizeof(StreamEpoch));
+      response[0] = AS_BYTE(Code::CloseStreamSubCommands::ALREADY_CLOSED);
       size_t response_offset = 1;
-      response.resize(3);
+      SCU_DO_AND_ASSERT(host_to_network(_connection_id, response, response_offset),
+        "Failed to convert connection ID to network format for CLOSE_STREAM ALREADY_CLOSED response");
       SCU_DO_AND_ASSERT(host_to_network<StreamNumber>(stream_num, response, response_offset),
         "Failed to convert stream number to network format for CLOSE_STREAM ALREADY_CLOSED response");
+      SCU_DO_AND_ASSERT(host_to_network<StreamEpoch>(_streams_epoch[stream_num], response, response_offset),
+        "Failed to convert stream epoch to network format for CLOSE_STREAM ALREADY_CLOSED response");
       if (SCU_UNLIKELY(!send(Code::CLOSE_STREAM, std::move(response), stream_num,
         _sequence_number))) {
         panic("Failed to send CLOSE_STREAM ALREADY_CLOSED response for non-existing stream");
@@ -1680,12 +1719,14 @@ SCU_COLD void ScorpioUdpStream::panic(std::string&& message) {
 
 void ScorpioUdpStream::send_create_packet() {
   std::vector<uint8_t> packet;
-  constexpr auto minimal_size = sizeof(Code::CreateStreamSubCommands) + sizeof(StreamNumber) +
-    sizeof(StreamQoS::Reliability) + sizeof(StreamEpoch);
+  constexpr auto minimal_size = sizeof(Code::CreateStreamSubCommands) + sizeof(ConnectionId) +
+    sizeof(StreamNumber) + sizeof(StreamQoS::Reliability) + sizeof(StreamEpoch);
   packet.reserve(minimal_size + sizeof(StreamQoS::depth));
   packet.resize(minimal_size);
   packet[0] = AS_BYTE(Code::CreateStreamSubCommands::CREATE);
   size_t offset = 1;
+  SCU_DO_AND_ASSERT(host_to_network(_parent->_connection_id, packet,
+                                       offset), "Failed to convert connection ID to network format");
   SCU_DO_AND_ASSERT(host_to_network(_stream_number, packet,
                                        offset), "Failed to convert stream number to network format");
   SCU_DO_AND_ASSERT(host_to_network(_stream_epoch, packet,
@@ -1717,9 +1758,12 @@ bool ScorpioUdpStream::closed() {
 
 bool ScorpioUdpStream::send_close_packet() {
   std::vector<uint8_t> packet;
-  packet.resize(sizeof(Code::CloseStreamSubCommands) + sizeof(StreamNumber) + sizeof(StreamEpoch));
+  packet.resize(sizeof(Code::CloseStreamSubCommands) + sizeof(ConnectionId) + sizeof(StreamNumber) +
+    sizeof(StreamEpoch));
   packet[0] = AS_BYTE(Code::CloseStreamSubCommands::CLOSE);
   size_t offset = 1;
+  SCU_DO_AND_ASSERT(host_to_network(_parent->_connection_id, packet,
+                                       offset), "Failed to convert connection ID to network format");
   SCU_DO_AND_ASSERT(host_to_network<StreamNumber>(_stream_number, packet,
                                        offset), "Failed to convert stream number to network format");
   SCU_DO_AND_ASSERT(host_to_network<StreamEpoch>(_stream_epoch, packet,
