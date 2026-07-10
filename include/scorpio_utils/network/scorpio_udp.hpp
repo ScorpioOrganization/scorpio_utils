@@ -258,6 +258,7 @@ private:
   // stuck on the same seq for SCU_UDP_TIMEOUT, the stream is panicked so it can be rebuilt.
   std::optional<size_t> _stuck_resend_seq;
   int64_t _stuck_resend_since;
+  std::atomic<int64_t> _last_heartbeat_time;
   std::string _panic_message;
   std::mutex _panic_mutex;
 

@@ -3037,3 +3037,101 @@ TEST_F(ScorpioUdpTester, unknown_command_byte_is_logged_and_ignored) {
   close_connection(events, connection_handle);
   execute_test(events);
 }
+
+// =====================================================================
+// Suite 10 — per-stream heartbeat timeout (stream_epoch feature)
+//
+// A RELIABLE stream that stops receiving heartbeats for SCU_UDP_TIMEOUT moves to
+// State::ERROR (ScorpioUdpStream::update, scorpio_udp.cpp:1789); incoming
+// heartbeats reset the per-stream clock (handle_heartbeat_data, cpp:2116);
+// connected() seeds it on activation (cpp:1740). The timeout is reliable-only.
+//
+// Pattern: refresh the CONNECTION every SCU_UDP_TIMEOUT/2 so its own 5s silence
+// timeout never trips (see reliable_stream_panics_when_peer_stuck_out_of_history),
+// while controlling whether the STREAM itself is fed heartbeats.
+// =====================================================================
+
+// A reliable stream starved of heartbeats for > SCU_UDP_TIMEOUT must transition
+// to ERROR (not alive), while the connection stays healthy. Bare heartbeats keep
+// the connection alive but never carry stream 1, so only the per-stream timeout
+// can fire here.
+TEST_F(ScorpioUdpTester, reliable_stream_errors_on_heartbeat_timeout) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = establish_incoming_reliable_stream(events, connection_handle, 1, 16);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  // 4 * (SCU_UDP_TIMEOUT/2) = 2 * SCU_UDP_TIMEOUT of stream silence; each bare
+  // heartbeat resets the connection clock (gap SCU_UDP_TIMEOUT/2 < timeout).
+  for (int i = 0; i < 4; ++i) {
+    events.push_back({ WHERE, 0, std::make_unique<AdvanceTimeEvent>(SCU_UDP_TIMEOUT / 2) });
+    events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+      generate_single_packet(Code::HEARTBEAT, { })) });
+  }
+  // Stream timed out -> ERROR (is_alive() == false); connection unaffected.
+  events.push_back({ WHERE, 0, stream_handle->stream_is_alive(false) });
+  events.push_back({ WHERE, 0, connection_handle->connection_is_panic(false) });
+  events.push_back({ WHERE, 0, connection_handle->connection_is_alive(true) });
+  events.push_back({ WHERE, 0, connection_handle->close_connection(true) });
+  execute_test(events);
+}
+
+// A reliable stream that keeps receiving heartbeats stays active well past
+// SCU_UDP_TIMEOUT. Regression guard for the _last_heartbeat_time reset in
+// handle_heartbeat_data: without it the stream would ERROR at 5s.
+TEST_F(ScorpioUdpTester, reliable_stream_heartbeat_refresh_prevents_timeout) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = establish_incoming_reliable_stream(events, connection_handle, 1, 16);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  // Heartbeat that names stream 1 (no holes) -> refreshes its per-stream clock.
+  const auto hb = generate_heartbeat_body(1, /*initial_end=*/ 0);
+  for (int i = 0; i < 6; ++i) {  // 6 * (SCU_UDP_TIMEOUT/2) = 3 * SCU_UDP_TIMEOUT total
+    events.push_back({ WHERE, 0, std::make_unique<AdvanceTimeEvent>(SCU_UDP_TIMEOUT / 2) });
+    events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+      generate_single_packet(Code::HEARTBEAT, hb)) });
+  }
+  events.push_back({ WHERE, 0, stream_handle->stream_is_active(true) });
+  events.push_back({ WHERE, 0, connection_handle->connection_is_alive(true) });
+  events.push_back({ WHERE, 0, connection_handle->close_connection(true) });
+  execute_test(events);
+}
+
+// The heartbeat timeout is reliable-only: an unreliable stream starved of
+// heartbeats stays active (its update() only expires partial data).
+TEST_F(ScorpioUdpTester, unreliable_stream_survives_heartbeat_silence) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = establish_incoming_unreliable_stream(events, connection_handle, 2);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  for (int i = 0; i < 4; ++i) {  // 2 * SCU_UDP_TIMEOUT of stream silence
+    events.push_back({ WHERE, 0, std::make_unique<AdvanceTimeEvent>(SCU_UDP_TIMEOUT / 2) });
+    events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+      generate_single_packet(Code::HEARTBEAT, { })) });
+  }
+  events.push_back({ WHERE, 0, stream_handle->stream_is_active(true) });
+  events.push_back({ WHERE, 0, connection_handle->connection_is_alive(true) });
+  events.push_back({ WHERE, 0, connection_handle->close_connection(true) });
+  execute_test(events);
+}
+
+// Guards the moved connection-liveness clock: STREAM_DATA still refreshes
+// _last_received_packet_time. Uses an unreliable stream so the per-stream
+// heartbeat timeout cannot interfere. (The HEARTBEAT branch is covered by
+// bare_heartbeat_keeps_connection_alive; CREATE_STREAM by every establish_*.)
+TEST_F(ScorpioUdpTester, connection_kept_alive_by_stream_data_only) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = establish_incoming_unreliable_stream(events, connection_handle, 2);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  for (SeqNumber seq = 0; seq < 4; ++seq) {  // 2 * SCU_UDP_TIMEOUT, refreshed by data only
+    std::vector<uint8_t> payload{ static_cast<uint8_t>(0xC0 + seq) };
+    events.push_back({ WHERE, 0, std::make_unique<AdvanceTimeEvent>(SCU_UDP_TIMEOUT / 2) });
+    events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+      stream_data_packet(2, seq, payload)) });
+    events.push_back({ WHERE, 0, stream_handle->stream_receive(payload) });
+  }
+  events.push_back({ WHERE, 0, connection_handle->connection_is_panic(false) });
+  events.push_back({ WHERE, 0, connection_handle->connection_is_alive(true) });
+  events.push_back({ WHERE, 0, connection_handle->close_connection(true) });
+  execute_test(events);
+}

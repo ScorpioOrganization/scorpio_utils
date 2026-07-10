@@ -1235,9 +1235,11 @@ void ScorpioUdpConnection::heartbeat_packet_handler(const MessageHeader& header,
 SCU_HOT void ScorpioUdpConnection::handle_new_packet(const MessageHeader& header, UdpData&& data) {
   switch (header.command) {
     case Code::CREATE_STREAM: {
+        _last_received_packet_time.store(_time_provider->get_time(), std::memory_order_relaxed);
         create_stream_packet_handler(header, std::move(data));
       } break;
     case Code::STREAM_DATA: {
+        _last_received_packet_time.store(_time_provider->get_time(), std::memory_order_relaxed);
         auto stream = get_stream(header.stream_number.value());
         if (!stream) {
           // TODO(@Igor): Handle error properly
@@ -1255,6 +1257,7 @@ SCU_HOT void ScorpioUdpConnection::handle_new_packet(const MessageHeader& header
         panic("Received ERROR packet from peer");
       } break;
     case Code::HEARTBEAT: {
+        _last_received_packet_time.store(_time_provider->get_time(), std::memory_order_relaxed);
         heartbeat_packet_handler(header, std::move(data));
       } break;
     case Code::STATUS: {
@@ -1286,7 +1289,6 @@ void ScorpioUdpConnection::process_packets(
   scorpio_utils::network::UdpData> packet) {
   SCU_LOG_TRACE(_logger, "Processing packet from {}:{}. Packet size: {} bytes",
       packet.second.ip.str(), packet.second.port, packet.second.data.size());
-  _last_received_packet_time.store(_time_provider->get_time(), std::memory_order_relaxed);
   _received_packet_count.fetch_add(1, std::memory_order_relaxed);
   handle_new_packet(packet.first, std::move(packet.second));
 }
@@ -1593,7 +1595,8 @@ ScorpioUdpStream::ScorpioUdpStream(
   _sequence_complement(0),
   _last_greatest_sequence_number(0),
   _stuck_resend_seq(std::nullopt),
-  _stuck_resend_since(0) {
+  _stuck_resend_since(0),
+  _last_heartbeat_time(_parent->_time_provider->get_time()) {
   SCU_ASSERT(stream_qos.is_reliable() || stream_qos.depth == 0, "Unreliable streams must have depth 0 (no ordering)");
   if (!stream_qos.is_reliable()) {
     _partial_data.emplace<1>();
@@ -1737,11 +1740,13 @@ void ScorpioUdpStream::send_create_packet() {
 
 void ScorpioUdpStream::connected() {
   State expected = State::CREATING;
-  _state.compare_exchange_strong(
+  if (_state.compare_exchange_strong(
     expected,
     State::CREATED,
     std::memory_order_relaxed,
-    std::memory_order_relaxed);
+    std::memory_order_relaxed)) {
+    _last_heartbeat_time.store(_parent->_time_provider->get_time(), std::memory_order_relaxed);
+  }
 }
 
 bool ScorpioUdpStream::closed() {
@@ -1783,7 +1788,13 @@ void ScorpioUdpStream::update() {
         send_create_packet();
       } break;
     case State::CREATED: {
-        if (!_stream_qos.is_reliable()) {
+        if (_stream_qos.is_reliable()) {
+          if (sat_sub(_parent->_time_provider->get_time(), _last_heartbeat_time.load(std::memory_order_relaxed)) >
+            SCU_UDP_TIMEOUT) {
+            SCU_LOG_ERROR(_logger, "Stream {} heartbeat timeout", _stream_number);
+            _state.store(State::ERROR, std::memory_order_relaxed);
+          }
+        } else {
           remove_expired_unreliable_data();
         }
       } break;
@@ -2102,6 +2113,8 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
   } else {
     _stuck_resend_seq.reset();
   }
+  // Everything is fine, set last heartbeat time to now so we don't panic the stream for timeout
+  _last_heartbeat_time.store(_parent->_time_provider->get_time(), std::memory_order_relaxed);
 }
 
 void ScorpioUdpStream::activate_stream() {
