@@ -1196,14 +1196,32 @@ void ScorpioUdpConnection::close_stream_packet_handler(const MessageHeader& head
 
 void ScorpioUdpConnection::heartbeat_packet_handler(const MessageHeader& header, UdpData&& data) {
   size_t pos = header.data_offset;
+  ConnectionId heartbeat_connection_id;
+  if (SCU_UNLIKELY(!network_to_host(data.data, &heartbeat_connection_id, pos))) {
+    SCU_LOG_ERROR(_logger, "Failed to parse connection_id from HEARTBEAT packet");
+    return;
+  }
+  if (SCU_UNLIKELY(heartbeat_connection_id != _connection_id)) {
+    SCU_LOG_WARNING(_logger, "Dropping HEARTBEAT with mismatched connection_id. ip: {}, port: {}, "
+      "existing connection_id: {}, received connection_id: {}",
+      _remote_ip.str(), _remote_port, _connection_id, heartbeat_connection_id);
+    return;
+  }
   StreamNumber stream_num;
   _last_received_heartbeat_time.store(_time_provider->get_time(), std::memory_order_relaxed);
   _received_heartbeat_count.fetch_add(1, std::memory_order_relaxed);
   while (network_to_host(data.data, &stream_num, pos)) {
-    if (auto stream = get_stream(stream_num)) {
+    StreamEpoch stream_epoch;
+    if (SCU_UNLIKELY(!network_to_host(data.data, &stream_epoch, pos))) {
+      SCU_LOG_ERROR(_logger, "Malformed heartbeat packet: missing stream epoch for stream number {}", stream_num);
+      break;
+    }
+    auto stream = get_stream(stream_num);
+    if (stream && stream->_stream_epoch == stream_epoch) {
       stream->handle_heartbeat_data(data.data, pos);
     } else {
-      SCU_LOG_DEBUG(_logger, "Received heartbeat data for non-existing stream number {}", stream_num);
+      SCU_LOG_DEBUG(_logger, "Received heartbeat data for non-existing stream number {} (or mismatched epoch {})",
+        stream_num, stream_epoch);
       std::vector<uint8_t> response;
       response.resize(sizeof(Code::CloseStreamSubCommands) + sizeof(ConnectionId) + sizeof(StreamNumber) +
         sizeof(StreamEpoch));
@@ -1239,7 +1257,6 @@ SCU_HOT void ScorpioUdpConnection::handle_new_packet(const MessageHeader& header
         create_stream_packet_handler(header, std::move(data));
       } break;
     case Code::STREAM_DATA: {
-        _last_received_packet_time.store(_time_provider->get_time(), std::memory_order_relaxed);
         auto stream = get_stream(header.stream_number.value());
         if (!stream) {
           // TODO(@Igor): Handle error properly
@@ -1319,6 +1336,12 @@ void ScorpioUdpConnection::send_heartbeat() {
   std::vector<uint8_t> heartbeat_data;
   constexpr size_t packet_size = SCU_UDP_MAX_PACKET_SIZE - calculate_header_without_frames_left_size(Code::HEARTBEAT);
   heartbeat_data.reserve(packet_size);
+  // Every heartbeat leads with the connection id so the peer can drop heartbeats
+  // meant for a stale connection incarnation (mirrors CONNECT/CREATE_STREAM/...).
+  heartbeat_data.resize(sizeof(ConnectionId));
+  size_t connection_id_pos = 0;
+  SCU_DO_AND_ASSERT(host_to_network(_connection_id, heartbeat_data, connection_id_pos),
+    "Failed to convert connection id to network format for HEARTBEAT");
   const auto l2_offset = SCU_AS(size_t, _next_stream_to_heartbeat) >> 12;
   const auto l1_first_start = (SCU_AS(size_t, _next_stream_to_heartbeat) >> 6) & 63;
   const auto idx_first_start = SCU_AS(size_t, _next_stream_to_heartbeat) & 63;
@@ -1834,6 +1857,7 @@ void ScorpioUdpStream::handle_data_packet(const MessageHeader& header, UdpData&&
         packet_epoch, _stream_epoch);
       return;
     }
+    _parent->_last_received_packet_time.store(_parent->_time_provider->get_time(), std::memory_order_relaxed);
     const auto seq_number = get_packet_number(header.seq_number.value());
     SCU_LOG_TRACE(_logger, "Processing ordered packet on stream {}: seq {}", _stream_number, seq_number);
     switch (_orderer.add(seq_number, { header, std::move(data.data) })) {
@@ -1862,6 +1886,7 @@ void ScorpioUdpStream::handle_data_packet(const MessageHeader& header, UdpData&&
       }
     }
   } else {
+    _parent->_last_received_packet_time.store(_parent->_time_provider->get_time(), std::memory_order_relaxed);
     if (header.is_first && !header.frames_left.has_value()) {
       _receive.send<true>(std::vector<uint8_t>(
         data.data.begin() + SCU_AS(int64_t, header.data_offset),
@@ -1977,10 +2002,13 @@ size_t ScorpioUdpStream::get_packet_number(const SeqNumber v) noexcept {
 
 bool ScorpioUdpStream::append_heartbeat_data(std::vector<uint8_t>& heartbeat_data) const {
   constexpr size_t packet_size = SCU_UDP_MAX_PACKET_SIZE - calculate_header_without_frames_left_size(Code::HEARTBEAT);
-  static_assert(packet_size >= sizeof(StreamNumber) + 1 + sizeof(SeqNumber),
+  // The connection id sits at the front of every heartbeat, so a single stream
+  // block must fit in what remains after it (keeps the forced first block <= 512).
+  constexpr size_t stream_region = packet_size - sizeof(ConnectionId);
+  constexpr size_t prefix_size = sizeof(StreamNumber) + sizeof(StreamEpoch) + 1;
+  static_assert(stream_region >= prefix_size + sizeof(SeqNumber),
     "Packet size is too small to fit any heartbeat data");
-  constexpr size_t prefix_size = sizeof(StreamNumber) + 1;
-  constexpr size_t max_required_size = prefix_size + ((packet_size - prefix_size - sizeof(SeqNumber)) & ~1ul) +
+  constexpr size_t max_required_size = prefix_size + ((stream_region - prefix_size - sizeof(SeqNumber)) & ~1ul) +
     sizeof(SeqNumber);
   static_assert(max_required_size >= prefix_size + sizeof(SeqNumber),
     "Max required size is too small to fit any heartbeat data");
@@ -1991,7 +2019,9 @@ bool ScorpioUdpStream::append_heartbeat_data(std::vector<uint8_t>& heartbeat_dat
   const auto contained = _orderer.get_contained();
   const auto required_size = std::min(
     prefix_size + contained.size() * 2 * sizeof(SeqNumber) - sizeof(SeqNumber), max_required_size);
-  if (!heartbeat_data.empty() && heartbeat_data.size() + required_size > packet_size) {
+  // heartbeat_data always leads with the connection id, so "no stream blocks yet"
+  // is size == sizeof(ConnectionId), not empty. The first block is force-appended.
+  if (heartbeat_data.size() > sizeof(ConnectionId) && heartbeat_data.size() + required_size > packet_size) {
     return false;
   }
 
@@ -1999,6 +2029,8 @@ bool ScorpioUdpStream::append_heartbeat_data(std::vector<uint8_t>& heartbeat_dat
   heartbeat_data.resize(pos + required_size);
   SCU_DO_AND_ASSERT(host_to_network(_stream_number, heartbeat_data, pos),
     "Failed to convert stream number to network format");
+  SCU_DO_AND_ASSERT(host_to_network<StreamEpoch>(_stream_epoch, heartbeat_data, pos),
+    "Failed to convert stream epoch to network format");
   const auto contained_count =
     std::min(contained.size() - 1, (max_required_size - prefix_size - sizeof(SeqNumber)) / (2 * sizeof(SeqNumber)));
   heartbeat_data[pos++] = AS_BYTE(contained_count);

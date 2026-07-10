@@ -355,16 +355,18 @@ Reliable streams use a **NACK-based retransmission** mechanism piggybacked onto 
 
 ### HEARTBEAT packet payload
 
-A single HEARTBEAT packet carries ACK/NACK state for one or more reliable streams. The command byte appears **once**; each reliable stream then contributes one block, packed back-to-back until the 512-byte packet is full.
+A single HEARTBEAT packet carries ACK/NACK state for one or more reliable streams. The command byte appears **once** and is immediately followed by the 8-byte [connection id](#connection-identity). Each reliable stream then contributes one block, packed back-to-back until the 512-byte packet is full.
 
 ```
-+----------+     +--------------+-------+------+-------+------+-------+------+----
-|  cmd     |     | StreamNumber | count | end0 | beg1  | end1 | beg2  | end2 | ...
-|  1 B     |     |    2 B       |  1 B  |  4 B |  4 B  |  4 B |  4 B  |  4 B |
-+----------+     +--------------+-------+------+-------+------+-------+------+----
-                 \________________ repeated per reliable stream ______________/
++----------+---------------+     +--------------+-------+-------+------+-------+------+-------+------+----
+|  cmd     | connection id |     | StreamNumber | epoch | count | end0 | beg1  | end1 | beg2  | end2 | ...
+|  1 B     |     8 B        |     |    2 B       |  1 B  |  1 B  |  4 B |  4 B  |  4 B |  4 B  |  4 B |
++----------+---------------+     +--------------+-------+-------+------+-------+------+-------+------+----
+                                 \___________________ repeated per reliable stream ___________________/
 ```
 
+- `connection id` = the connection's `uint64_t` id. The receiver **drops the entire heartbeat** if it does not match the local connection (guards against a stale connection incarnation, same as CONNECT/CREATE_STREAM/...).
+- `epoch` = the stream's `StreamEpoch` (`uint8_t`). A block whose epoch does not match the live stream is treated as an **unknown stream**: the receiver replies `CLOSE_STREAM { ALREADY_CLOSED }` and skips the block.
 - `count` = number of gap ranges for this stream (`count + 1` ranges reported total)
 - `end0` = next expected sequence number (one past the last contiguously received packet)
 - Each following `(begin, end)` pair describes a held range that sits above a gap
