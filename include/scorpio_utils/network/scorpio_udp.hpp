@@ -47,6 +47,24 @@
 #define SCU_UDP_HEARTBEAT_PERIOD (50'000'000)
 #define SCU_UDP_TIMEOUT (5'000'000'000)
 #define SCU_UDP_CREATE_RETRY_PERIOD (5'000'000'000)
+// Minimum time between retransmissions of the same packet. Without it a packet in
+// flight longer than one heartbeat period would be resent on every heartbeat,
+// amplifying congestion into a retransmission storm.
+#ifndef SCU_UDP_RESEND_INTERVAL
+#define SCU_UDP_RESEND_INTERVAL (3 * SCU_UDP_HEARTBEAT_PERIOD)
+#endif
+// Per-heartbeat cap on tail retransmissions (packets past the peer's highest
+// reported sequence number). Recovery is front-first, so a small budget still
+// converges while bounding the work done per heartbeat.
+#ifndef SCU_UDP_TAIL_RESEND_BUDGET
+#define SCU_UDP_TAIL_RESEND_BUDGET (64)
+#endif
+// Hard cap on the number of distinct stuck-resend seqs tracked at once (safety valve;
+// in practice already bounded by the QoS depth window since send() panics before the
+// outstanding un-acked window can grow past it).
+#ifndef SCU_UDP_STUCK_RESEND_TRACK_LIMIT
+#define SCU_UDP_STUCK_RESEND_TRACK_LIMIT (4096)
+#endif
 
 namespace scorpio_utils::network {
 struct UdpData {
@@ -61,6 +79,7 @@ using SeqNumberComplement = uint32_t;
 using StreamNumber = uint16_t;
 using FramesLeft = uint16_t;
 using ConnectionId = uint64_t;
+using StreamEpoch = uint8_t;
 
 #ifdef SCU_UDP_MOCK
 using TimeProvider = scorpio_utils::testing::MockTimeProvider;
@@ -228,10 +247,24 @@ private:
   friend class ScorpioUdpConnection;
   threading::Channel<std::vector<uint8_t>, 1024 * 1024> _receive;
   const StreamNumber _stream_number;
+  const StreamEpoch _stream_epoch;
   const StreamQoS _stream_qos;
+  // True when this stream was created in response to a peer CREATE (acceptor side).
+  // The creator side is authoritative for the stream's incarnation (epoch), which
+  // decides who yields when a CREATE with a different epoch arrives.
+  const bool _created_by_peer;
   const int64_t _creation_time;
   std::mutex _sent_history_mutex;
-  std::vector<std::optional<std::vector<uint8_t>>> _sent_history;
+  // Retransmission history entry. The sequence number is stored so a slot whose
+  // seq was already allocated but not yet written (or that was recycled by ring
+  // wrap-around) is never mistaken for the requested packet. The last send time
+  // throttles retransmissions to SCU_UDP_RESEND_INTERVAL per packet.
+  struct SentPacket {
+    std::vector<uint8_t> data;
+    size_t seq;
+    int64_t last_send_time;
+  };
+  std::vector<std::optional<SentPacket>> _sent_history;
   std::shared_ptr<ScorpioUdpConnection> _parent;
   std::atomic<size_t> _sequence_number;
   std::atomic<size_t> _least_non_delivered_seq_number;
@@ -251,11 +284,15 @@ private:
   std::variant<std::vector<uint8_t>, UnreliablePartialData> _partial_data;
   SeqNumberComplement _sequence_complement;
   SeqNumber _last_greatest_sequence_number;
-  // Debounce for unrecoverable resend requests: when the peer keeps asking for a packet
-  // that has fallen out of _sent_history, we track which seq and since when. If it stays
-  // stuck on the same seq for SCU_UDP_TIMEOUT, the stream is panicked so it can be rebuilt.
-  std::optional<size_t> _stuck_resend_seq;
-  int64_t _stuck_resend_since;
+  // Tracks, per seq, when it was first observed as an unrecoverable (out-of-history)
+  // resend request that the peer is still making. Entries are erased once the peer's
+  // ack cursor passes them (no longer requested). Bounded by SCU_UDP_STUCK_RESEND_TRACK_LIMIT
+  // as a safety valve, though in practice it's already capped by the QoS depth window.
+  std::map<size_t, int64_t> _stuck_resend_since;
+  std::atomic<int64_t> _last_heartbeat_time;
+  // When the CLOSING state was entered; a stream stuck in CLOSING for longer than
+  // SCU_UDP_TIMEOUT is failed so it stops pinning its stream number forever.
+  std::atomic<int64_t> _closing_since;
   std::string _panic_message;
   std::mutex _panic_mutex;
 
@@ -264,8 +301,8 @@ private:
   void send_create_packet();
   bool send_close_packet();
   ScorpioUdpStream(
-    StreamNumber stream_number, StreamQoS stream_qos,
-    std::shared_ptr<ScorpioUdpConnection> parent);
+    StreamNumber stream_number, StreamEpoch stream_epoch, StreamQoS stream_qos,
+    bool created_by_peer, std::shared_ptr<ScorpioUdpConnection> parent);
 
   bool send(Code code, const std::vector<uint8_t>& data);
   void panic(std::string&& message);
@@ -351,6 +388,10 @@ private:
   const Ipv4 _remote_ip;
   const Port _remote_port;
   const ConnectionId _connection_id;
+  // True when this side initiated the connection via ScorpioUdp::connect().
+  // Used as a deterministic tie-break when both peers create the same stream
+  // number concurrently: the dialer's stream wins on both sides.
+  const bool _is_dialer;
   std::atomic<size_t> _sequence_number;
   std::atomic<bool> _panic;
   std::atomic<State> _state;
@@ -382,7 +423,14 @@ private:
   std::array<std::atomic<bool>, max_streams_count> _stream_exists;
   std::array<std::atomic<uint64_t>, max_streams_count / (64 * 64)> _streams_mask_level_2;
   std::array<std::atomic<uint64_t>, max_streams_count / 64> _streams_mask;
+  // _streams (the weak_ptr objects themselves) must only be touched by the
+  // connection processing thread, or after that thread has been joined
+  // (close()/teardown). Stream destructors must NOT write into it - concurrent
+  // weak_ptr::reset() vs lock() is a data race.
   std::array<std::weak_ptr<ScorpioUdpStream>, max_streams_count> _streams;
+  // Written by app threads (create_stream) and the connection thread
+  // (CREATE handler), read by the heartbeat handler - hence atomic.
+  std::array<std::atomic<StreamEpoch>, max_streams_count> _streams_epoch;
   std::thread _processing_thread;
   bool connected();
   std::shared_ptr<ScorpioUdpStream> get_stream(StreamNumber);
@@ -395,15 +443,17 @@ private:
   void process_packets(std::pair<scorpio_utils::network::MessageHeader, scorpio_utils::network::UdpData> packet);
   void send_heartbeat();
   void processing_thread();
+  void panic_streams();
 
   ScorpioUdpConnection(
-    Ipv4 remote_ip, Port remote_port, ConnectionId connection_id,
+    Ipv4 remote_ip, Port remote_port, ConnectionId connection_id, bool is_dialer,
     std::shared_ptr<ScorpioUdp> parent);
   void panic(std::string&& message);
   void panic_soft(std::string&& message);
   auto generate_packets(
     Code code, const std::vector<uint8_t>& data, std::optional<StreamNumber> stream_number = std::nullopt,
-    std::optional<std::reference_wrapper<std::atomic<size_t>>> sequence_number = std::nullopt);
+    std::optional<std::reference_wrapper<std::atomic<size_t>>> sequence_number = std::nullopt,
+    std::optional<StreamEpoch> stream_epoch = std::nullopt);
   bool send(
     Code code, const std::vector<uint8_t>& data, std::optional<StreamNumber> stream_number = std::nullopt,
     std::optional<std::reference_wrapper<std::atomic<size_t>>> sequence_number = std::nullopt);
@@ -535,10 +585,19 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   std::string _panic_message;
   std::atomic<bool> _panic;
   std::unordered_map<std::pair<Ipv4, Port>, std::weak_ptr<ScorpioUdpConnection>> _connections;
+  // Rate limiter for "you are not connected" (DISCONNECT/ALREADY_DISCONNECTED)
+  // replies to heartbeats from peers we have no connection for. Only ever touched
+  // by the socket processing thread.
+  std::unordered_map<std::pair<Ipv4, Port>, int64_t> _unknown_connection_reply_times;
   std::mutex _panic_mutex;
   std::recursive_mutex _threads_mutex;
   std::unique_ptr<threading::Channel<std::shared_ptr<ScorpioUdpConnection>>> _new_connections;
   threading::Channel<UdpData, 1024 * 16> _sender_channel;
+  // Control packets (everything except STREAM_DATA) bypass the bulk-data queue and
+  // are always drained first by the sender thread. Under saturation this keeps
+  // heartbeats and handshakes flowing, so connections do not falsely time out just
+  // because application data flooded the socket.
+  threading::Channel<UdpData, 1024 * 16> _control_sender_channel;
   threading::Channel<UdpData, 1024 * 16> _receiver_channel;
   threading::Channel<std::weak_ptr<ScorpioUdpConnection>> _awaiting_connections_channel;
   std::vector<std::thread> _threads;
@@ -582,6 +641,7 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   void handle_ping_packet(const MessageHeader& header, const UdpData& data);
   void handle_connect_packet(const MessageHeader& header, const UdpData& data);
   void handle_disconnect_packet(const MessageHeader& header, const UdpData& data);
+  void reply_unknown_connection_heartbeat(const MessageHeader& header, const UdpData& data);
   void pull_awaiting_connections(std::weak_ptr<ScorpioUdpConnection> connection_weak);
   std::shared_ptr<ScorpioUdpConnection> get_connection(Ipv4 remote_ip, Port remote_port);
 
@@ -671,5 +731,6 @@ std::optional<std::pair<size_t, std::vector<std::vector<uint8_t>>>> generate_pac
   std::optional<scorpio_utils::network::StreamNumber> stream_number,
   std::atomic<size_t>& sequence_number,
   scorpio_utils::network::Code code,
-  const std::vector<uint8_t>& data);
+  const std::vector<uint8_t>& data,
+  std::optional<scorpio_utils::network::StreamEpoch> stream_epoch = std::nullopt);
 #endif

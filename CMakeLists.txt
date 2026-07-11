@@ -25,10 +25,11 @@ endif()
 
 add_compile_options(-std=c++17 -Wall -Wextra -Wpedantic -pedantic-errors -Wdeprecated
   -Wc++17-compat -Wconversion -Wsign-conversion -Wpessimizing-move -Werror
-  # -flto=auto
+  -g -fno-omit-frame-pointer
+  -flto=auto
 )
 
-# add_link_options(-flto=auto)
+add_link_options(-flto=auto)
 
 include_directories(
   include/
@@ -194,7 +195,9 @@ if(BUILD_TESTING)
   # However, right now it fails - needs to be fixed (possibly mock udp implementation issue)
 
   # Test of mock_udp.cpp required for network tests
-  ament_add_gtest(test_scorpio_udp_mock test/network/test_scorpio_udp_mock.cpp)
+  # The churn/restart soak tests run tens of seconds of simulated loss on top
+  # of the original suite - the 60s ament default is too tight.
+  ament_add_gtest(test_scorpio_udp_mock test/network/test_scorpio_udp_mock.cpp TIMEOUT 180)
 
   target_compile_definitions(test_scorpio_udp_mock PRIVATE
     -DSCU_MOCK_UDP_DELAY_MIN_MS=10

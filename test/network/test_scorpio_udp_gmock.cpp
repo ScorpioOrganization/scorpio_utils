@@ -41,6 +41,7 @@ using testing::_;
   Ipv4 ip(4, 3, 2, 1); \
   Port port = 1234; \
   Signal stop; \
+  Signal closed; \
   auto time_provider = ScorpioUdp::get_time_provider(); \
   EXPECT_CALL(socket, open()) \
   .Times(1) \
@@ -53,8 +54,9 @@ using testing::_;
   .WillOnce(Return(Success::instance())); \
   EXPECT_CALL(socket, close()) \
   .Times(1) \
-  .WillOnce([&stop] { \
+  .WillOnce([&stop, &closed] { \
       stop.notify_one(); \
+      closed.notify_one(); \
       return true; \
   }); \
   EXPECT_CALL(socket, is_open()) \
@@ -65,9 +67,21 @@ using testing::_;
   ASSERT_TRUE(scorpio_udp->start()); \
   ASSERT_TRUE(scorpio_udp->listen(ip, port))
 
+// Dropping the last owning reference does not synchronously destroy the ScorpioUdp:
+// the processing thread holds a self-reference for the whole body of each loop
+// iteration and blocks inside eager_select, which only returns when a channel is
+// ready or its EagerSelectTimeout elapses. Under the mock (frozen) time provider the
+// timeout never fires on its own, so the thread would park forever holding that
+// reference and ~ScorpioUdp (which calls socket.close()) would never run. Keep
+// ticking mock time so the thread keeps returning from eager_select, drops the
+// reference and runs teardown, then wait until close() is actually observed instead
+// of relying on a fixed sleep (which is what made this flaky on CI).
 #define CLOSE_SCORPIO_UDP \
   scorpio_udp.reset(); \
-  std::this_thread::sleep_for(std::chrono::milliseconds(150))
+  for (int _close_wait = 0; _close_wait < 5000 && !closed.try_take(); ++_close_wait) { \
+    time_provider->advance_time(SCU_UDP_HEARTBEAT_PERIOD); \
+    std::this_thread::sleep_for(std::chrono::milliseconds(1)); \
+  }
 
 TEST(ScorpioUdpGmock, Listen) {
   SOCKET_COMMON_SETUP;
