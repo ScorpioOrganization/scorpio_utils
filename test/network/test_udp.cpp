@@ -146,10 +146,16 @@ TEST(UdpSocketTest, HighLoad) {
   scorpio_utils::threading::JThread receiver_thread([&]() {
       std::unordered_set<uint32_t> received_values;
       uint8_t buffer[512];
-      for (size_t i = 0; i < NUM_PACKETS; ++i) {
+      while (received_values.size() < NUM_PACKETS) {
         auto receive_result = socket1.receive(buffer, sizeof(buffer));
         if (receive_result.err()) {
           break;
+        }
+        if (receive_result.ok_value().byte_count == 0) {
+          // A transient socket condition (EINTR/EAGAIN/ECONNREFUSED from an ICMP
+          // bounce under load) now surfaces as an empty datagram instead of an
+          // error - it is not a real packet, so retry without counting it.
+          continue;
         }
         EXPECT_EQ(receive_result.ok_value().byte_count, 4);
         EXPECT_TRUE(received_values.insert(*reinterpret_cast<uint32_t*>(buffer)).second) <<
