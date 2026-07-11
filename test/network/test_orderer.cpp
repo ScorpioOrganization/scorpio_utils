@@ -1,4 +1,8 @@
 #include <gtest/gtest.h>
+#include <random>
+#include <set>
+#include <utility>
+#include <vector>
 #include "scorpio_utils/network/orderer.hpp"
 
 using scorpio_utils::network::Orderer;
@@ -308,4 +312,60 @@ TEST(OrdererTest, GetContainedFunctionality) {
   contained = orderer.get_contained();
   ASSERT_EQ(contained.size(), 1);
   EXPECT_EQ(contained[0], std::make_pair(0ul, 5ul));  // Final range from 0 to 5
+}
+
+// Cross-checks the incrementally maintained held ranges (get_contained) against a
+// brute-force scan of the buffer, across randomized interleavings of add()/next().
+// Guards the O(#ranges) range bookkeeping that replaced the full-buffer scan.
+TEST(OrdererTest, GetContainedMatchesBruteForceUnderRandomOps) {
+  constexpr size_t kSize = 64;
+  constexpr size_t kIterations = 20000;
+  Orderer<int> orderer(kSize);
+  // Reference model: which absolute indices are currently held.
+  std::set<size_t> held;
+  size_t current_index = 0;
+  std::mt19937_64 rng(0xC0FFEE);
+
+  const auto brute_force_contained = [&]() {
+      std::vector<std::pair<size_t, size_t>> contained;
+      contained.emplace_back(0, current_index);
+      for (size_t i = 0; i < kSize; ++i) {
+        const auto idx = current_index + i;
+        if (held.count(idx) != 0) {
+          if (contained.back().second == idx) {
+            ++contained.back().second;
+          } else {
+            contained.emplace_back(idx, idx + 1);
+          }
+        }
+      }
+      return contained;
+    };
+
+  for (size_t iteration = 0; iteration < kIterations; ++iteration) {
+    if (rng() % 3 != 0) {
+      // Random add within (and slightly beyond) the window.
+      const auto index = current_index + rng() % (kSize + 8);
+      const auto result = orderer.add(index, static_cast<int>(index));
+      if (current_index + kSize <= index) {
+        EXPECT_EQ(result, OrdererAddResult::TOO_NEW);
+      } else if (held.count(index) != 0) {
+        EXPECT_EQ(result, OrdererAddResult::ALREADY_PRESENT);
+      } else {
+        EXPECT_EQ(result, OrdererAddResult::SUCCESS);
+        held.insert(index);
+      }
+    } else {
+      const auto value = orderer.next();
+      if (held.count(current_index) != 0) {
+        ASSERT_TRUE(value.has_value());
+        EXPECT_EQ(*value, static_cast<int>(current_index));
+        held.erase(current_index);
+        ++current_index;
+      } else {
+        EXPECT_FALSE(value.has_value());
+      }
+    }
+    ASSERT_EQ(orderer.get_contained(), brute_force_contained()) << "iteration " << iteration;
+  }
 }

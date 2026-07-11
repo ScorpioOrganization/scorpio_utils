@@ -204,3 +204,104 @@ TEST(MockScorpioUdp, SendDataOrder) {
 // }
 // ASSERT_GE(received_packets.size(), 500ul);
 // }
+
+// Soak test for the self-healing pass: several reliable streams churn through
+// create -> send batch -> receiver-side close -> recreate cycles, all under the
+// mock link's 10% loss and 10-50 ms delay. The receiver closes a stream only
+// after the full batch arrived, so a CLOSED client stream proves delivery; a
+// panicked incarnation is simply retried with a fresh epoch (exercising the
+// stale-incarnation CREATE handling). The only requirement is progress: every
+// stream must complete all rounds before the deadline - no freeze, no zombie.
+TEST(MockScorpioUdp, StreamChurnUnderLossSelfHeals) {
+  const auto [client_connection, server_connection] = get_client_server_connection(PORT);
+  ASSERT_TRUE(client_connection);
+  ASSERT_TRUE(server_connection);
+  server_connection->set_auto_accept_stream(true);
+
+  constexpr uint16_t kStreams = 6;
+  constexpr int kRounds = 3;
+  constexpr int kMessages = 10;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+
+  std::atomic<bool> server_stop{ false };
+  scorpio_utils::threading::JThread server_thread([&server_stop, &server_connection]() {
+      std::vector<std::pair<std::shared_ptr<ScorpioUdpStream>, int>> active;
+      try {
+        while (!server_stop.load(std::memory_order_relaxed)) {
+          while (auto accepted = server_connection->get_accepted_stream()) {
+            active.emplace_back(std::move(*accepted), 0);
+          }
+          for (auto it = active.begin(); it != active.end(); ) {
+            auto& [stream, received] = *it;
+            while (auto data = stream->receive<false>()) {
+              EXPECT_EQ(data->size(), 4u);
+              ++received;
+            }
+            if (received >= kMessages) {
+              // Full batch confirmed - close from the receiving side.
+              std::ignore = stream->close();
+              it = active.erase(it);
+            } else if (!stream->is_alive()) {
+              // Stale/failed incarnation - forget it, the client retries.
+              it = active.erase(it);
+            } else {
+              ++it;
+            }
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+      } catch (const scorpio_utils::threading::ClosedChannelException&) {
+      }
+    });
+
+  struct ClientStream {
+    std::shared_ptr<ScorpioUdpStream> stream;
+    int round = 0;
+    bool batch_sent = false;
+  };
+  std::vector<ClientStream> streams(kStreams);
+  size_t completed = 0;
+  while (completed < kStreams && std::chrono::steady_clock::now() < deadline) {
+    for (uint16_t s = 0; s < kStreams; ++s) {
+      auto& cs = streams[s];
+      if (cs.round >= kRounds) {
+        continue;
+      }
+      if (!cs.stream) {
+        cs.stream = client_connection->create_stream(
+          static_cast<scorpio_utils::network::StreamNumber>(100 + s),
+          { 64, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED });
+        cs.batch_sent = false;
+        continue;
+      }
+      if (!cs.stream->is_alive()) {
+        // CLOSED = server confirmed the whole batch; ERROR = failed incarnation,
+        // retry the same round with a fresh stream (and a fresh epoch).
+        const bool round_delivered = cs.stream->state() == ScorpioUdpStream::State::CLOSED;
+        cs.stream.reset();
+        if (round_delivered) {
+          ++cs.round;
+          if (cs.round == kRounds) {
+            ++completed;
+          }
+        }
+        continue;
+      }
+      if (cs.stream->is_active() && !cs.batch_sent) {
+        bool all_sent = true;
+        for (int m = 0; m < kMessages && all_sent; ++m) {
+          all_sent = cs.stream->send({
+            static_cast<uint8_t>(s & 0xff), static_cast<uint8_t>(s >> 8),
+            static_cast<uint8_t>(cs.round), static_cast<uint8_t>(m) });
+        }
+        cs.batch_sent = all_sent;
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  EXPECT_EQ(completed, kStreams) << "not all streams completed their rounds before the deadline";
+  EXPECT_TRUE(client_connection->is_alive());
+  EXPECT_TRUE(server_connection->is_alive());
+  server_stop.store(true, std::memory_order_relaxed);
+  server_thread.join();
+}

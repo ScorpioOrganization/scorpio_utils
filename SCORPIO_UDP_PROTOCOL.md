@@ -158,7 +158,15 @@ Each command packet carries a 1-byte subcommand as the first payload byte. `CONN
 | 0 | DISCONNECT | either -> either |
 | 1 | ACCEPTED | responder -> initiator |
 | 2 | REJECTED | responder -> initiator |
-| 3 | ALREADY_DISCONNECTED | responder -> initiator |
+| 3 | ALREADY_DISCONNECTED | responder -> initiator, or unsolicited (see below) |
+
+`ALREADY_DISCONNECTED` is also sent **unsolicited** (rate limited to one per heartbeat
+period per peer address) in reply to a HEARTBEAT arriving for an address the socket has
+no connection for, echoing the heartbeat's connection id. A peer that receives
+`ALREADY_DISCONNECTED` whose id matches its own live CONNECTED connection fails that
+connection immediately ("the other side has no state for me - it must have restarted")
+instead of waiting for the 5 s no-packet timeout. A mismatched id is ignored, so a stale
+reply addressed to a previous incarnation can never tear down a fresh connection.
 
 Both CONNECT and DISCONNECT packets lay out their payload as the subcommand byte followed by the 8-byte connection id:
 
@@ -179,7 +187,7 @@ The responder always echoes back the connection id it received, unchanged. See [
 | 1 | ACCEPT | acceptor -> initiator |
 | 2 | REJECT | acceptor -> initiator |
 | 3 | REJECT_SIMILAR_EXISTED | acceptor -> initiator (same ID, different QoS) |
-| 4 | ALREADY_EXISTS | acceptor -> initiator (same ID, same QoS) |
+| 4 | ALREADY_EXISTS | acceptor -> initiator (same ID, same QoS **and same epoch**) |
 
 Every `CREATE_STREAM` subcommand carries the same fixed prefix, followed by subcommand-specific fields:
 
@@ -317,6 +325,24 @@ A CREATE_STREAM `CREATE` packet carries the connection id, stream number, stream
 
 `StreamEpoch` is a `uint8_t` chosen for the stream slot: initiators seed it randomly per stream number when the connection is created and increment it on every local `create_stream()` call; acceptors adopt whatever value the initiator sent in `CREATE`. A block/packet whose epoch doesn't match the receiver's live value for that stream number is treated as belonging to a stale, previous incarnation of the stream (see [HEARTBEAT packet payload](#heartbeat-packet-payload)).
 
+How the acceptor resolves a `CREATE` against its local state for that stream number:
+
+- **No live stream, slot free** -> accept (or `REJECT` when auto-accept is off / QoS unsupported).
+- **No live stream, but the slot is still claimed** by a dead stream the application has not
+  released yet (or by a local `create_stream()` awaiting activation) -> the packet is
+  **dropped silently**. This is transient: the initiator retries `CREATE` every heartbeat
+  and either succeeds once the slot frees or gives up after `SCU_UDP_CREATE_RETRY_PERIOD`.
+  The receiver never blocks waiting for the slot.
+- **Live stream, different QoS** -> the local stream is panicked, reply `REJECT_SIMILAR_EXISTED`.
+- **Live stream, same QoS, same epoch** -> reply `ALREADY_EXISTS` (idempotent retry).
+- **Live stream, same QoS, different epoch** -> a **new incarnation**:
+  - if the local stream was created by the peer, the local copy is stale: it is panicked and
+    the packet is dropped (the peer's retry succeeds once the slot frees);
+  - if the local stream was created locally, both peers created the same stream number
+    concurrently. The tie-break is deterministic: **the connection dialer's stream wins**.
+    The acceptor-side peer panics its own stream and stays silent; the dialer-side peer
+    ignores the packet. Both sides converge without any freeze or reply loop.
+
 ```mermaid
 sequenceDiagram
     participant A as Initiator
@@ -382,10 +408,13 @@ Reliable streams use a **NACK-based retransmission** mechanism piggybacked onto 
 
 ### How it works
 
-1. **Sender** stores every sent packet in `_sent_history`, a ring buffer of size `depth + SCU_UDP_QOS_DEPTH_SAFETY_BUFFER`.
+1. **Sender** stores every sent packet in `_sent_history`, a ring buffer of size `depth + SCU_UDP_QOS_DEPTH_SAFETY_BUFFER`, together with its sequence number and last-transmit time.
 2. **Receiver** buffers incoming packets in an `Orderer` and delivers them in order. It tracks which sequence number ranges it has received.
 3. **Every heartbeat (50ms)**, the receiver encodes its held ranges into a HEARTBEAT packet.
 4. **Sender** reads the HEARTBEAT, finds gaps between the reported ranges, and resends missing packets from `_sent_history`.
+5. **Tail retransmission**: packets above everything the ranges mention (`[end_last, current seq)`) cannot be NACKed - the receiver does not know they exist. The sender proactively resends this unacked tail as well (front-first, bounded by `SCU_UDP_TAIL_RESEND_BUDGET` per heartbeat), so the lost last packets of a burst are still recovered.
+6. **Retransmission throttle**: a packet is never retransmitted more often than once per `SCU_UDP_RESEND_INTERVAL` (measured from its last transmit). Without it, any packet in flight longer than one heartbeat period would be resent on every heartbeat, amplifying congestion into a retransmission storm.
+7. **Range validation**: reported ranges must be ascending and can never exceed the sender's current sequence number. A block that violates this (corruption, or a stale incarnation echo) is ignored in its entirety rather than acted upon.
 
 ### HEARTBEAT packet payload
 
@@ -399,8 +428,8 @@ A single HEARTBEAT packet carries ACK/NACK state for one or more reliable stream
                                  \___________________ repeated per reliable stream ___________________/
 ```
 
-- `connection id` = the connection's `uint64_t` id. The receiver **drops the entire heartbeat** if it does not match the local connection (guards against a stale connection incarnation, same as CONNECT/CREATE_STREAM/...).
-- `epoch` = the stream's `StreamEpoch` (`uint8_t`). A block whose epoch does not match the live stream is treated as an **unknown stream**: the receiver replies `CLOSE_STREAM { ALREADY_CLOSED }` and skips the block.
+- `connection id` = the connection's `uint64_t` id. The receiver **drops the entire heartbeat** if it does not match the local connection (guards against a stale connection incarnation, same as CONNECT/CREATE_STREAM/...). Liveness (`last received packet time`) is refreshed only **after** this validation succeeds - a heartbeat from a mismatched incarnation must not keep a zombie connection alive.
+- `epoch` = the stream's `StreamEpoch` (`uint8_t`). A block whose epoch does not match the live stream is treated as an **unknown stream**: the receiver replies `CLOSE_STREAM { ALREADY_CLOSED }` **echoing the epoch from the block** (so the reply matches the sender's live incarnation and actually closes it) and skips the block.
 - `count` = number of gap ranges for this stream (`count + 1` ranges reported total)
 - `end0` = next expected sequence number (one past the last contiguously received packet)
 - Each following `(begin, end)` pair describes a held range that sits above a gap
@@ -431,9 +460,12 @@ On the receive side:
 ## Keepalive and Timeout
 
 - A HEARTBEAT is sent every **50ms** from each connection's processing thread.
-- If no packet (of any kind) is received for **5 seconds** (`SCU_UDP_TIMEOUT`), the connection panics and closes.
+- If no packet (of any kind) is received for **5 seconds** (`SCU_UDP_TIMEOUT`), the connection panics and closes. Only packets that passed **connection id validation** count as proof of life; traffic from a mismatched (stale) incarnation is dropped without refreshing the clock.
 - Each **reliable** stream additionally tracks its own last-heartbeat-ACK time independently of the connection: if `SCU_UDP_TIMEOUT` elapses without a heartbeat response covering that stream, only that stream panics (`State::ERROR`) - the connection and its other streams are unaffected.
+- A stream stuck in **CLOSING** for `SCU_UDP_TIMEOUT` (the peer never answers the close) panics instead of retrying forever - a live CLOSING stream pins its stream number, which would otherwise stay unusable.
+- When a **connection** dies (panic, rejection, or any abnormal processing-thread exit), the failure **cascades to every stream** on it, including streams still queued for creation. No stream may outlive its connection in a usable-looking state.
 - The HEARTBEAT serves double duty: keepalive signal and reliable-stream ACK/NACK carrier.
+- HEARTBEATs and all other control packets (CONNECT/DISCONNECT/CREATE_STREAM/CLOSE_STREAM/ERROR) travel through a **priority send queue** drained before bulk STREAM_DATA, so a saturated data path cannot starve keepalives into false timeouts.
 
 ## Protocol Constants
 
@@ -441,7 +473,9 @@ On the receive side:
 |----------|-------|---------|
 | `SCU_UDP_MAX_PACKET_SIZE` | 512 bytes | Maximum UDP payload |
 | `SCU_UDP_HEARTBEAT_PERIOD` | 50 ms | Heartbeat interval |
-| `SCU_UDP_TIMEOUT` | 5 s | No-packet timeout before disconnect |
+| `SCU_UDP_TIMEOUT` | 5 s | No-packet timeout before disconnect; also the CLOSING and stuck-resend give-up timeout |
 | `SCU_UDP_CREATE_RETRY_PERIOD` | 5 s | Stream creation give-up timeout (CREATE retried every heartbeat until this elapses) |
 | `SCU_UDP_UNRELIABLE_DATA_EXPIRY_NS` | 500 ms | Expiry for incomplete unreliable fragments |
 | `SCU_UDP_QOS_DEPTH_SAFETY_BUFFER` | 4096 | Extra history slots beyond QoS depth |
+| `SCU_UDP_RESEND_INTERVAL` | 150 ms (3 heartbeats) | Minimum time between retransmissions of the same packet |
+| `SCU_UDP_TAIL_RESEND_BUDGET` | 64 | Maximum tail retransmissions per heartbeat per stream |
