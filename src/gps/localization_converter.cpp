@@ -131,14 +131,14 @@ LocalizationConverter::LocalizationConverter(
   const double cos_alpha = std::cos(alpha_rad);
   const double sin_alpha = std::sin(alpha_rad);
 
-  // R = R_azimuth * R_enu to get ECEF to RFU (Right-Forward-Up)
-  _r11 = cos_alpha * enu_r11 - sin_alpha * enu_r21;
-  _r12 = cos_alpha * enu_r12 - sin_alpha * enu_r22;
-  _r13 = cos_alpha * enu_r13 - sin_alpha * enu_r23;
+  // R = R_azimuth * R_enu to get ECEF to RFU (Forward-Left-Up)
+  _r11 = sin_alpha * enu_r11 + cos_alpha * enu_r21;
+  _r12 = sin_alpha * enu_r12 + cos_alpha * enu_r22;
+  _r13 = sin_alpha * enu_r13 + cos_alpha * enu_r23;
 
-  _r21 = sin_alpha * enu_r11 + cos_alpha * enu_r21;
-  _r22 = sin_alpha * enu_r12 + cos_alpha * enu_r22;
-  _r23 = sin_alpha * enu_r13 + cos_alpha * enu_r23;
+  _r21 = -cos_alpha * enu_r11 + sin_alpha * enu_r21;
+  _r22 = -cos_alpha * enu_r12 + sin_alpha * enu_r22;
+  _r23 = -cos_alpha * enu_r13 + sin_alpha * enu_r23;
 
   _r31 = enu_r31;
   _r32 = enu_r32;
@@ -159,12 +159,12 @@ void LocalizationConverter::gps_to_local(
   const double dy = y_ecef - _y0_ecef;
   const double dz = z_ecef - _z0_ecef;
 
-  // Rotate from ECEF to local RFU
+  // Rotate from ECEF to local FLU
   const double r = _r11 * dx + _r12 * dy + _r13 * dz;
   const double f = _r21 * dx + _r22 * dy + _r23 * dz;
   const double u = _r31 * dx + _r32 * dy + _r33 * dz;
 
-  // Output: x=Right, y=Forward, z=Up
+  // Output: x=Forward, y=Left, z=Up
   x = r;
   y = f;
   z = u;
@@ -174,12 +174,12 @@ void LocalizationConverter::local_to_gps(
   double x, double y, double z,
   double& lat, double& lon, double& alt_egm96
 ) const {
-  // Input: x=Right, y=Forward, z=Up
+  // Input: x=Forward, y=Left, z=Up
   const double r = x;
   const double f = y;
   const double u = z;
 
-  // Rotate from local RFU to ECEF (transpose of rotation matrix)
+  // Rotate from local FLU to ECEF (transpose of rotation matrix)
   const double dx = _r11 * r + _r21 * f + _r31 * u;
   const double dy = _r12 * r + _r22 * f + _r32 * u;
   const double dz = _r13 * r + _r23 * f + _r33 * u;
