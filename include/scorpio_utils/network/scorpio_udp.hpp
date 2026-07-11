@@ -59,6 +59,12 @@
 #ifndef SCU_UDP_TAIL_RESEND_BUDGET
 #define SCU_UDP_TAIL_RESEND_BUDGET (64)
 #endif
+// Hard cap on the number of distinct stuck-resend seqs tracked at once (safety valve;
+// in practice already bounded by the QoS depth window since send() panics before the
+// outstanding un-acked window can grow past it).
+#ifndef SCU_UDP_STUCK_RESEND_TRACK_LIMIT
+#define SCU_UDP_STUCK_RESEND_TRACK_LIMIT (4096)
+#endif
 
 namespace scorpio_utils::network {
 struct UdpData {
@@ -278,11 +284,11 @@ private:
   std::variant<std::vector<uint8_t>, UnreliablePartialData> _partial_data;
   SeqNumberComplement _sequence_complement;
   SeqNumber _last_greatest_sequence_number;
-  // Debounce for unrecoverable resend requests: when the peer keeps asking for a packet
-  // that has fallen out of _sent_history, we track which seq and since when. If it stays
-  // stuck on the same seq for SCU_UDP_TIMEOUT, the stream is panicked so it can be rebuilt.
-  std::optional<size_t> _stuck_resend_seq;
-  int64_t _stuck_resend_since;
+  // Tracks, per seq, when it was first observed as an unrecoverable (out-of-history)
+  // resend request that the peer is still making. Entries are erased once the peer's
+  // ack cursor passes them (no longer requested). Bounded by SCU_UDP_STUCK_RESEND_TRACK_LIMIT
+  // as a safety valve, though in practice it's already capped by the QoS depth window.
+  std::map<size_t, int64_t> _stuck_resend_since;
   std::atomic<int64_t> _last_heartbeat_time;
   // When the CLOSING state was entered; a stream stuck in CLOSING for longer than
   // SCU_UDP_TIMEOUT is failed so it stops pinning its stream number forever.

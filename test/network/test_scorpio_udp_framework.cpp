@@ -2444,6 +2444,65 @@ TEST_F(ScorpioUdpTester, reliable_stream_panics_when_peer_stuck_out_of_history) 
   execute_test(events);
 }
 
+// Regression: production logs showed the peer cycling between several DIFFERENT
+// out-of-history seqs across heartbeats (0, 5, 6, 12, 20, 22, ...) and the stream never
+// panicking. Root cause: a heartbeat can report MULTIPLE simultaneous out-of-history holes
+// (a genuinely stuck connection loses more than one packet at a time), but the old tracker
+// only ever remembered the FIRST (lowest) one it scanned that pass and silently dropped the
+// rest. When that front hole eventually resolved and a later hole became the new "first
+// encountered", the old code treated it as a brand-new occurrence and reset the timer to
+// `now` -- even though that later hole had already been sitting unresolved, unreported,
+// since the very first pass. Construct exactly that: two simultaneous holes (seq 1 and
+// seq 3) in the first heartbeat; seq 1 then "resolves" (peer's ack cursor advances past it)
+// while seq 3 remains stuck forever. The panic must fire SCU_UDP_TIMEOUT after seq 3 was
+// FIRST observed (pass 1), not SCU_UDP_TIMEOUT after it became the reported front (pass 2).
+TEST_F(ScorpioUdpTester, reliable_stream_panics_using_first_observed_time_of_stuck_seq) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  constexpr uint16_t kDepth = 1;  // buffer = depth + SAFETY_BUFFER(8) = 9
+  auto stream_handle = create_outgoing_reliable_stream(events, connection_handle, 1, kDepth);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+
+  auto send_range = [&](SeqNumber from, SeqNumber to) {
+      for (SeqNumber seq = from; seq < to; ++seq) {
+        events.push_back({ WHERE, 0, stream_handle->stream_send({ static_cast<uint8_t>(seq) }) });
+      }
+      events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+    };
+  send_range(0, 5);
+  events.push_back({ WHERE, 0, stream_handle->inject_heartbeat(/*initial_end=*/ 5) });
+  // Let the connection thread process the ACK (advance least-non-delivered) before sending
+  // the next batch, otherwise the send guard would see an un-acked backlog and overflow.
+  events.push_back({ WHERE, 0, std::make_unique<AdvanceTimeEvent>(TICK_TIME * 2) });
+  send_range(5, 13);
+  // sequence_number is now 13, history size is 9 -> seqs 0..3 are out of history
+  // (i + 9 < 13). Seqs 1 and 3 are both unrecoverable holes below.
+
+  // Pass 1: peer holds [2,3) and [4,13) -> missing seq 1 AND seq 3, both out of history.
+  // Both get tracked with first-seen time "now" (t=0).
+  events.push_back({ WHERE, 0,
+      stream_handle->inject_heartbeat(/*initial_end=*/ 1, /*held_ranges=*/ { { 2u, 3u }, { 4u, 13u } }) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_panic(false) });
+
+  // Pass 2, at t=T/2: seq 1 has since "arrived" (peer's ack cursor advances to 3), pruning
+  // its entry. Seq 3 is still missing -> it is now the sole/"first encountered" hole, but its
+  // tracked first-seen time must still be t=0 from pass 1, not reset to t=T/2.
+  events.push_back({ WHERE, 0, std::make_unique<AdvanceTimeEvent>(SCU_UDP_TIMEOUT / 2) });
+  events.push_back({ WHERE, 0, stream_handle->inject_heartbeat(/*initial_end=*/ 3, /*held_ranges=*/ { { 4u, 13u } }) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_panic(false) });  // ~T/2 since seq 3 first seen: tolerated
+
+  // Pass 3, at t=T: seq 3 is still missing. Elapsed since its TRUE first-seen time (pass 1,
+  // t=0) is now T -> must panic. (A single-slot tracker that reset at pass 2 would only be
+  // at T/2 since its own reset and would wrongly stay quiet.)
+  events.push_back({ WHERE, 0, std::make_unique<AdvanceTimeEvent>(SCU_UDP_TIMEOUT / 2) });
+  events.push_back({ WHERE, 0, stream_handle->inject_heartbeat(/*initial_end=*/ 3, /*held_ranges=*/ { { 4u, 13u } }) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_panic(true) });
+  // Tolerant teardown (a panicked stream still emits stray heartbeats); assert close succeeds
+  // rather than the exact DISCONNECT handshake packets.
+  events.push_back({ WHERE, 0, connection_handle->close_connection(true) });
+  execute_test(events);
+}
+
 // =====================================================================
 // Suite 5 — unreliable stream data
 // =====================================================================
