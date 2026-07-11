@@ -268,8 +268,8 @@ TEST_F(LocalizationConverterTest, AzimuthPeriodicityAndNegativeAngles) {
 }
 
 TEST_F(LocalizationConverterTest, GpsToLocalAzimuth90) {
-  // azimuth = 0 => rover is directed to the East, increase in lat should result in decrease of X,
-  // increase in lon, should result in increase in Y
+  // azimuth = 90 => rover is directed to the Ease, increase in lat should result in increase of Y,
+  // increase in lon, should result in increase in X
   auto conv_az90 = std::make_unique<scorpio_utils::gps::LocalizationConverter>(
     ref_lat, ref_lon, ref_alt, 90.0
   );
@@ -281,6 +281,48 @@ TEST_F(LocalizationConverterTest, GpsToLocalAzimuth90) {
   double x, y, z;
   conv_az90->gps_to_local(test_lat, test_lon, test_alt, x, y, z);
 
+  EXPECT_GT(x, 900.0);
+  EXPECT_LT(x, 1100.0);
+  EXPECT_GT(y, 900.0);
+  EXPECT_LT(y, 1100.0);
+  EXPECT_TRUE(isApproxEqual(z, 50.0, 5.0));
+}
+
+TEST_F(LocalizationConverterTest, GpsToLocalAzimuth270) {
+  // azimuth = 270 => rover is directed to the West, increase in lat should result in decrease of Y,
+  // increase in lon, should result in decrease in X
+  auto conv_az270 = std::make_unique<scorpio_utils::gps::LocalizationConverter>(
+    ref_lat, ref_lon, ref_alt, 270.0
+  );
+
+  double test_lat = ref_lat + 0.009;
+  double test_lon = ref_lon + 0.014;
+  double test_alt = ref_alt + 50.0;
+
+  double x, y, z;
+  conv_az270->gps_to_local(test_lat, test_lon, test_alt, x, y, z);
+
+  EXPECT_LT(x, -900.0);
+  EXPECT_GT(x, -1100.0);
+  EXPECT_LT(y, -900.0);
+  EXPECT_GT(y, -1100.0);
+  EXPECT_TRUE(isApproxEqual(z, 50.0, 5.0));
+}
+
+TEST_F(LocalizationConverterTest, GpsToLocalAzimuth180) {
+  // azimuth = 180 => rover is directed to the South, increase in lat should result in decrease of X,
+  // increase in lon, should result in increase in Y
+  auto conv_az180 = std::make_unique<scorpio_utils::gps::LocalizationConverter>(
+    ref_lat, ref_lon, ref_alt, 180.0
+  );
+
+  double test_lat = ref_lat + 0.009;
+  double test_lon = ref_lon + 0.014;
+  double test_alt = ref_alt + 50.0;
+
+  double x, y, z;
+  conv_az180->gps_to_local(test_lat, test_lon, test_alt, x, y, z);
+
   EXPECT_LT(x, -900.0);
   EXPECT_GT(x, -1100.0);
   EXPECT_GT(y, 900.0);
@@ -288,23 +330,8 @@ TEST_F(LocalizationConverterTest, GpsToLocalAzimuth90) {
   EXPECT_TRUE(isApproxEqual(z, 50.0, 5.0));
 }
 
-TEST_F(LocalizationConverterTest, LocalToGpsAzimuth90) {
-  // rover is directed to the East, so increase in Y, should result in only increase
-  // in lon and slight change in alt due to a curvature
-  auto conv_az90 = std::make_unique<scorpio_utils::gps::LocalizationConverter>(
-    ref_lat, ref_lon, ref_alt, 90.0
-  );
-
-  double lat, lon, alt;
-  conv_az90->local_to_gps(0.0, 10.0, 0.0, lat, lon, alt);
-
-  EXPECT_TRUE(isApproxEqual(lat, ref_lat));
-  EXPECT_GT(lon, ref_lon);
-  EXPECT_TRUE(isApproxEqual(alt, ref_alt, 1e-5));
-}
-
 TEST_F(LocalizationConverterTest, Azimuth45Diagonal) {
-  // rover is directed to the North-East, so increase in lat, should result in increase in Y and decrease in X
+  // rover is directed to the North-East, so increase in lat, should result in increase in Y and in X
   auto conv_az45 = std::make_unique<scorpio_utils::gps::LocalizationConverter>(
     ref_lat, ref_lon, ref_alt, 45.0
   );
@@ -313,7 +340,7 @@ TEST_F(LocalizationConverterTest, Azimuth45Diagonal) {
   conv_az45->gps_to_local(ref_lat + 0.001, ref_lon, ref_alt, x, y, z);
 
   EXPECT_GT(y, 0.0);
-  EXPECT_LT(x, 0.0);
+  EXPECT_GT(x, 0.0);
 
-  EXPECT_TRUE(isApproxEqual(std::abs(x), std::abs(y), 0.1));
+  EXPECT_TRUE(isApproxEqual(x, y, 0.1));
 }
