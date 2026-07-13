@@ -293,6 +293,18 @@ private:
   // When the CLOSING state was entered; a stream stuck in CLOSING for longer than
   // SCU_UDP_TIMEOUT is failed so it stops pinning its stream number forever.
   std::atomic<int64_t> _closing_since;
+  // Drop/loss diagnostics: retransmissions of already-received data (reliable path:
+  // Orderer TOO_OLD/ALREADY_PRESENT; unreliable path: duplicate fragment), heartbeat
+  // resend requests for a seq that has fallen out of _sent_history, and unreliable
+  // partial-data fragments discarded by remove_expired_unreliable_data().
+  std::atomic<uint64_t> _duplicate_count;
+  std::atomic<uint64_t> _out_of_history_drop_count;
+  std::atomic<uint64_t> _expired_unreliable_fragment_count;
+  // Distinct from is_panic()/state()==ERROR: this counts how many times panic()
+  // actually committed (see panic()) and records when it last did, so a caller
+  // doesn't need to already be watching the stream to notice a panic happened.
+  std::atomic<uint64_t> _panic_count;
+  std::atomic<int64_t> _last_panic_time;
   std::string _panic_message;
   std::mutex _panic_mutex;
 
@@ -360,6 +372,26 @@ public:
     }
     return std::nullopt;
   }
+  SCU_ALWAYS_INLINE auto duplicate_count() const noexcept {
+    return _duplicate_count.load(std::memory_order_relaxed);
+  }
+  SCU_ALWAYS_INLINE auto out_of_history_drop_count() const noexcept {
+    return _out_of_history_drop_count.load(std::memory_order_relaxed);
+  }
+  SCU_ALWAYS_INLINE auto expired_unreliable_fragment_count() const noexcept {
+    return _expired_unreliable_fragment_count.load(std::memory_order_relaxed);
+  }
+  SCU_ALWAYS_INLINE auto reorder_count() const noexcept {
+    return _orderer.get_reorder_count();
+  }
+  SCU_ALWAYS_INLINE auto panic_count() const noexcept {
+    return _panic_count.load(std::memory_order_relaxed);
+  }
+  inline std::optional<int64_t> last_panic_time() const noexcept {
+    return _panic_count.load(std::memory_order_relaxed) != 0 ?
+           std::optional{ _last_panic_time.load(std::memory_order_relaxed) } :
+           std::nullopt;
+  }
   SCU_ALWAYS_INLINE void set_logger(std::shared_ptr<logger::Logger> logger) noexcept {
     _logger = std::move(logger);
   }
@@ -412,6 +444,10 @@ private:
   std::atomic<uint64_t> _retransmission_count;
   std::atomic<uint64_t> _received_bytes;
   std::atomic<uint64_t> _send_bytes;
+  // Distinct from is_panic(): counts how many times panic()/panic_soft() actually
+  // committed (see their definitions) and records when it last happened.
+  std::atomic<uint64_t> _panic_count;
+  std::atomic<int64_t> _last_panic_time;
 
   uint16_t _next_stream_to_heartbeat;
   std::mutex _close_mutex;
@@ -557,6 +593,14 @@ public:
   SCU_ALWAYS_INLINE auto send_bytes() const noexcept {
     return _send_bytes.load(std::memory_order_relaxed);
   }
+  SCU_ALWAYS_INLINE auto panic_count() const noexcept {
+    return _panic_count.load(std::memory_order_relaxed);
+  }
+  inline std::optional<int64_t> last_panic_time() const noexcept {
+    return _panic_count.load(std::memory_order_relaxed) != 0 ?
+           std::optional{ _last_panic_time.load(std::memory_order_relaxed) } :
+           std::nullopt;
+  }
   SCU_ALWAYS_INLINE void set_logger(std::shared_ptr<logger::Logger> logger) noexcept {
     _logger = std::move(logger);
   }
@@ -594,6 +638,10 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
 
   std::string _panic_message;
   std::atomic<bool> _panic;
+  // Distinct from is_panic(): counts how many times panic() actually committed
+  // (see its definition) and records when it last happened.
+  std::atomic<uint64_t> _panic_count;
+  std::atomic<int64_t> _last_panic_time;
   std::unordered_map<std::pair<Ipv4, Port>, std::weak_ptr<ScorpioUdpConnection>> _connections;
   // Rate limiter for "you are not connected" (DISCONNECT/ALREADY_DISCONNECTED)
   // replies to heartbeats from peers we have no connection for. Only ever touched
@@ -737,6 +785,16 @@ public:
       return _panic_message;
     }
     return std::nullopt;
+  }
+
+  SCU_ALWAYS_INLINE auto panic_count() const noexcept {
+    return _panic_count.load(std::memory_order_relaxed);
+  }
+
+  inline std::optional<int64_t> last_panic_time() const noexcept {
+    return _panic_count.load(std::memory_order_relaxed) != 0 ?
+           std::optional{ _last_panic_time.load(std::memory_order_relaxed) } :
+           std::nullopt;
   }
 
   SCU_ALWAYS_INLINE void set_logger(std::shared_ptr<logger::Logger> logger) noexcept {

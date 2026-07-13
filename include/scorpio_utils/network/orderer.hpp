@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <functional>
 #include <optional>
 #include <type_traits>
@@ -28,6 +29,11 @@ class Orderer {
   // scanning the whole buffer - with large buffers and frequent heartbeats the scan
   // dominated a connection's processing budget.
   std::vector<std::pair<size_t, size_t>> _held_ranges;
+  // Count of add() calls that landed ahead of the current head (index != _current_index),
+  // i.e. had to be buffered instead of delivered immediately. Written only by the thread
+  // that owns this Orderer (like the rest of its state), but is atomic because it is the
+  // one piece of diagnostic state meant to be read from other threads.
+  std::atomic<size_t> _reorder_count;
 
   void insert_into_ranges(size_t index) {
     // First range that starts after index (its predecessor, if any, starts at or before).
@@ -58,7 +64,8 @@ public:
   explicit Orderer(size_t size)
   : _data(size, std::nullopt),
     _current_index(0),
-    _current_count(0) { }
+    _current_count(0),
+    _reorder_count(0) { }
 
   SCU_ALWAYS_INLINE auto get_size() const noexcept {
     return _data.size();
@@ -70,6 +77,10 @@ public:
 
   SCU_ALWAYS_INLINE constexpr auto get_current_index() const noexcept {
     return _current_index;
+  }
+
+  SCU_ALWAYS_INLINE auto get_reorder_count() const noexcept {
+    return _reorder_count.load(std::memory_order_relaxed);
   }
 
   bool set_size(size_t new_size) {
@@ -95,6 +106,9 @@ public:
     _data[slot] = data;
     ++_current_count;
     insert_into_ranges(index);
+    if (index != _current_index) {
+      _reorder_count.fetch_add(1, std::memory_order_relaxed);
+    }
     return OrdererAddResult::SUCCESS;
   }
 
@@ -113,6 +127,9 @@ public:
     _data[slot] = std::move(data);
     ++_current_count;
     insert_into_ranges(index);
+    if (index != _current_index) {
+      _reorder_count.fetch_add(1, std::memory_order_relaxed);
+    }
     return OrdererAddResult::SUCCESS;
   }
 

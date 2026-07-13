@@ -1182,6 +1182,10 @@ public:
     // predict precisely.
     const std::optional<bool> _has_last_heartbeat_time;
     const std::optional<bool> _has_last_received_packet_time;
+    const std::optional<uint64_t> _panic_count;
+    // Same has_value()-only reasoning as the other timestamps above, applied to
+    // last_panic_time().
+    const std::optional<bool> _has_last_panic_time;
     // Lower bound on send_bytes, for flows where the exact total is not
     // predictable because the connection's own periodic HEARTBEAT traffic (not
     // controlled by the test) also counts against it.
@@ -1196,6 +1200,7 @@ public:
       std::optional<uint64_t> received_heartbeat_count, std::optional<uint64_t> send_heartbeat_count,
       std::optional<uint64_t> send_partial_heartbeat_count,
       std::optional<bool> has_last_heartbeat_time, std::optional<bool> has_last_received_packet_time,
+      std::optional<uint64_t> panic_count, std::optional<bool> has_last_panic_time,
       std::optional<uint64_t> min_send_bytes,
       int64_t period, size_t max_attempts)
     : _handle(std::move(handle)), _send_bytes(send_bytes), _received_bytes(received_bytes),
@@ -1204,6 +1209,7 @@ public:
       _send_partial_heartbeat_count(send_partial_heartbeat_count),
       _has_last_heartbeat_time(has_last_heartbeat_time),
       _has_last_received_packet_time(has_last_received_packet_time),
+      _panic_count(panic_count), _has_last_panic_time(has_last_panic_time),
       _min_send_bytes(min_send_bytes),
       _period(period), _max_attempts(max_attempts) { }
 
@@ -1236,6 +1242,8 @@ public:
           matches(_send_partial_heartbeat_count, conn->send_partial_heartbeat_count()) &&
           matches(_has_last_heartbeat_time, conn->last_heartbeat_time().has_value()) &&
           matches(_has_last_received_packet_time, conn->last_received_packet_time().has_value()) &&
+          matches(_panic_count, conn->panic_count()) &&
+          matches(_has_last_panic_time, conn->last_panic_time().has_value()) &&
           matches_min(_min_send_bytes, conn->send_bytes())) {
           return Success();
         }
@@ -1250,7 +1258,9 @@ public:
         ", send_heartbeat_count=" + std::to_string(conn->send_heartbeat_count()) +
         ", send_partial_heartbeat_count=" + std::to_string(conn->send_partial_heartbeat_count()) +
         ", has_last_heartbeat_time=" + std::to_string(conn->last_heartbeat_time().has_value()) +
-        ", has_last_received_packet_time=" + std::to_string(conn->last_received_packet_time().has_value()));
+        ", has_last_received_packet_time=" + std::to_string(conn->last_received_packet_time().has_value()) +
+        ", panic_count=" + std::to_string(conn->panic_count()) +
+        ", has_last_panic_time=" + std::to_string(conn->last_panic_time().has_value()));
     }
     std::string name() override {
       return "ExpectCounters"s;
@@ -1268,12 +1278,15 @@ public:
     std::optional<uint64_t> send_partial_heartbeat_count = std::nullopt,
     std::optional<bool> has_last_heartbeat_time = std::nullopt,
     std::optional<bool> has_last_received_packet_time = std::nullopt,
+    std::optional<uint64_t> panic_count = std::nullopt,
+    std::optional<bool> has_last_panic_time = std::nullopt,
     std::optional<uint64_t> min_send_bytes = std::nullopt,
     int64_t period = TICK_TIME, size_t max_attempts = 20) {
     return std::unique_ptr<ExpectCounters>(new ExpectCounters(
       shared_from_this(), send_bytes, received_bytes, retransmission_count, received_packet_count,
       received_heartbeat_count, send_heartbeat_count, send_partial_heartbeat_count,
-      has_last_heartbeat_time, has_last_received_packet_time, min_send_bytes, period, max_attempts));
+      has_last_heartbeat_time, has_last_received_packet_time, panic_count, has_last_panic_time,
+      min_send_bytes, period, max_attempts));
   }
 };
 
@@ -1646,6 +1659,91 @@ public:
     bool expect_panic = true, int64_t period = TICK_TIME, size_t max_attempts = 20) {
     return std::unique_ptr<StreamIsPanic>(
       new StreamIsPanic(shared_from_this(), expect_panic, period, max_attempts));
+  }
+
+  // Polls the stream's diagnostic counters until every provided expectation
+  // matches (or max_attempts is exhausted). Unset optionals are not checked.
+  // Mirrors ConnectionHandle::ExpectCounters.
+  class ExpectStreamCounters final : public EventInTime {
+    friend class StreamHandle;
+    const std::shared_ptr<StreamHandle> _handle;
+    const std::optional<uint64_t> _duplicate_count;
+    const std::optional<uint64_t> _out_of_history_drop_count;
+    const std::optional<uint64_t> _expired_unreliable_fragment_count;
+    const std::optional<uint64_t> _reorder_count;
+    const std::optional<uint64_t> _panic_count;
+    // Checks .has_value() on last_panic_time() rather than an exact timestamp,
+    // since the mock clock value at the moment a background thread panics the
+    // stream is not something the caller can predict precisely.
+    const std::optional<bool> _has_last_panic_time;
+    const int64_t _period;
+    const size_t _max_attempts;
+
+    ExpectStreamCounters(
+      std::shared_ptr<StreamHandle> handle,
+      std::optional<uint64_t> duplicate_count, std::optional<uint64_t> out_of_history_drop_count,
+      std::optional<uint64_t> expired_unreliable_fragment_count, std::optional<uint64_t> reorder_count,
+      std::optional<uint64_t> panic_count, std::optional<bool> has_last_panic_time,
+      int64_t period, size_t max_attempts)
+    : _handle(std::move(handle)), _duplicate_count(duplicate_count),
+      _out_of_history_drop_count(out_of_history_drop_count),
+      _expired_unreliable_fragment_count(expired_unreliable_fragment_count),
+      _reorder_count(reorder_count), _panic_count(panic_count), _has_last_panic_time(has_last_panic_time),
+      _period(period), _max_attempts(max_attempts) { }
+
+    static bool matches(const std::optional<uint64_t>& expected, uint64_t actual) noexcept {
+      return !expected.has_value() || *expected == actual;
+    }
+    static bool matches(const std::optional<bool>& expected, bool actual) noexcept {
+      return !expected.has_value() || *expected == actual;
+    }
+
+public:
+    Expected<Success, std::string> execute(
+      int64_t,
+      UdpSocket&,
+      std::shared_ptr<ScorpioUdp>
+    ) override {
+      SCU_ASSERT(_handle->_stream.has_value(), "Handle does not contain a stream");
+      const auto& stream = *(_handle->_stream);
+      const auto time_provider = ScorpioUdp::get_time_provider();
+      for (size_t attempt = 0; attempt < _max_attempts; ++attempt) {
+        if (matches(_duplicate_count, stream->duplicate_count()) &&
+          matches(_out_of_history_drop_count, stream->out_of_history_drop_count()) &&
+          matches(_expired_unreliable_fragment_count, stream->expired_unreliable_fragment_count()) &&
+          matches(_reorder_count, stream->reorder_count()) &&
+          matches(_panic_count, stream->panic_count()) &&
+          matches(_has_last_panic_time, stream->last_panic_time().has_value())) {
+          return Success();
+        }
+        time_provider->advance_time(_period);
+        std::this_thread::sleep_for(std::chrono::nanoseconds(_period));
+      }
+      return Unexpected("Stream counters expectation not met: duplicate_count="s +
+        std::to_string(stream->duplicate_count()) +
+        ", out_of_history_drop_count=" + std::to_string(stream->out_of_history_drop_count()) +
+        ", expired_unreliable_fragment_count=" + std::to_string(stream->expired_unreliable_fragment_count()) +
+        ", reorder_count=" + std::to_string(stream->reorder_count()) +
+        ", panic_count=" + std::to_string(stream->panic_count()) +
+        ", has_last_panic_time=" + std::to_string(stream->last_panic_time().has_value()));
+    }
+    std::string name() override {
+      return "ExpectStreamCounters"s;
+    }
+    ~ExpectStreamCounters() override = default;
+  };
+
+  std::unique_ptr<ExpectStreamCounters> expect_stream_counters(
+    std::optional<uint64_t> duplicate_count = std::nullopt,
+    std::optional<uint64_t> out_of_history_drop_count = std::nullopt,
+    std::optional<uint64_t> expired_unreliable_fragment_count = std::nullopt,
+    std::optional<uint64_t> reorder_count = std::nullopt,
+    std::optional<uint64_t> panic_count = std::nullopt,
+    std::optional<bool> has_last_panic_time = std::nullopt,
+    int64_t period = TICK_TIME, size_t max_attempts = 20) {
+    return std::unique_ptr<ExpectStreamCounters>(new ExpectStreamCounters(
+      shared_from_this(), duplicate_count, out_of_history_drop_count, expired_unreliable_fragment_count,
+      reorder_count, panic_count, has_last_panic_time, period, max_attempts));
   }
 
   // ---- Epoch-aware events for locally-created streams -----------------------
@@ -2218,7 +2316,7 @@ TEST_F(ScorpioUdpTester, accept_connection_and_close_tracks_counters) {
   // full packets themselves and go through the raw-packet send() overload).
   events.push_back({ WHERE, 0, connection_handle->expect_counters(
     std::nullopt, SCU_AS(uint64_t, 0), std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-    std::nullopt, std::nullopt, /*min_send_bytes=*/ disconnect_payload.size()) });
+    std::nullopt, std::nullopt, std::nullopt, std::nullopt, /*min_send_bytes=*/ disconnect_payload.size()) });
   events.push_back({ WHERE, 0, std::make_unique<ExpectSocketCounters>(
     std::nullopt, connect_packet.size(), std::nullopt,
         /*min_send_bytes=*/ accepted_packet.size() + disconnect_packet.size()) });
@@ -2284,6 +2382,10 @@ TEST_F(ScorpioUdpTester, connection_panics_on_peer_silence) {
   // detects "no packets received" and panics.
   events.push_back({ WHERE, 0, std::make_unique<AdvanceTimeEvent>(SCU_UDP_TIMEOUT + TICK_TIME * 4) });
   events.push_back({ WHERE, 0, connection_handle->connection_is_panic(true) });
+  // Distinct from is_panic(): panic_count/last_panic_time record that it happened.
+  events.push_back({ WHERE, 0, connection_handle->expect_counters(
+    std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+    std::nullopt, std::nullopt, /*panic_count=*/ SCU_AS(uint64_t, 1), /*has_last_panic_time=*/ true) });
   // Explicit close — see comment in connect_rejected_by_peer.
   events.push_back({ WHERE, 0, connection_handle->close_connection(true) });
   execute_test(events);
@@ -2477,6 +2579,11 @@ TEST_F(ScorpioUdpTester, reliable_stream_receive_out_of_order_is_reordered) {
   for (SeqNumber seq = 0; seq < 3; ++seq) {
     events.push_back({ WHERE, 0, stream_handle->stream_receive(payloads[seq]) });
   }
+  // Only seq 2 arrived ahead of a gap (current_index was 0 at the time); seq 0
+  // then arrives exactly at the head, and seq 1 fills the gap exactly at the
+  // head too - neither of those two counts as a reorder.
+  events.push_back({ WHERE, 0, stream_handle->expect_stream_counters(
+    std::nullopt, std::nullopt, std::nullopt, /*reorder_count=*/ SCU_AS(uint64_t, 1)) });
   close_connection(events, connection_handle);
   execute_test(events);
 }
@@ -2497,6 +2604,7 @@ TEST_F(ScorpioUdpTester, reliable_stream_duplicate_ignored) {
   events.push_back({ WHERE, 0, stream_handle->stream_receive(payload1) });
   // No further data — the duplicate of seq 0 must have been dropped.
   events.push_back({ WHERE, 0, stream_handle->stream_expect_no_receive() });
+  events.push_back({ WHERE, 0, stream_handle->expect_stream_counters(/*duplicate_count=*/ SCU_AS(uint64_t, 1)) });
   close_connection(events, connection_handle);
   execute_test(events);
 }
@@ -2543,7 +2651,8 @@ TEST_F(ScorpioUdpTester, reliable_stream_send_emits_stream_data_tracks_byte_coun
   // which adds to send_bytes too.
   events.push_back({ WHERE, 0, connection_handle->expect_counters(
     std::nullopt, create_stream_size, std::nullopt, SCU_AS(uint64_t, 1), std::nullopt, std::nullopt, std::nullopt,
-    std::nullopt, std::nullopt, /*min_send_bytes=*/ create_stream_size + stream_data_size) });
+    std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        /*min_send_bytes=*/ create_stream_size + stream_data_size) });
   close_connection(events, connection_handle);
   execute_test(events);
 }
@@ -2656,7 +2765,7 @@ TEST_F(ScorpioUdpTester, reliable_stream_multiple_sends_accumulate_byte_counters
   // connection's own periodic HEARTBEAT traffic also counts against it.
   events.push_back({ WHERE, 0, connection_handle->expect_counters(
     std::nullopt, create_stream_size, std::nullopt, SCU_AS(uint64_t, 1), std::nullopt, std::nullopt, std::nullopt,
-    std::nullopt, std::nullopt, /*min_send_bytes=*/ min_expected_send_bytes) });
+    std::nullopt, std::nullopt, std::nullopt, std::nullopt, /*min_send_bytes=*/ min_expected_send_bytes) });
   close_connection(events, connection_handle);
   execute_test(events);
 }
@@ -2793,6 +2902,10 @@ TEST_F(ScorpioUdpTester, reliable_stream_panics_when_peer_stuck_out_of_history) 
   // First occurrence: warns and starts the timer, but must NOT panic yet.
   events.push_back({ WHERE, 0, stuck_hb() });
   events.push_back({ WHERE, 0, stream_handle->stream_is_panic(false) });
+  // Only seq 1 is out of history each pass (the tail probe over [2, 11) finds
+  // nothing unrecoverable here - see the comment above on the history math).
+  events.push_back({ WHERE, 0, stream_handle->expect_stream_counters(
+    std::nullopt, /*out_of_history_drop_count=*/ SCU_AS(uint64_t, 1)) });
 
   // Re-send the same NACK every SCU_UDP_TIMEOUT/2 so the connection's own 5s silence
   // timeout never trips; after the total exceeds SCU_UDP_TIMEOUT the stream must panic.
@@ -2804,6 +2917,15 @@ TEST_F(ScorpioUdpTester, reliable_stream_panics_when_peer_stuck_out_of_history) 
     events.push_back({ WHERE, 0, stuck_hb() });
   }
   events.push_back({ WHERE, 0, stream_handle->stream_is_panic(true) });
+  // The panic actually commits on the 3rd stuck_hb() call (elapsed since seq 1's
+  // first-seen time reaches SCU_UDP_TIMEOUT there), each of those 3 calls
+  // contributing one out-of-history hit for seq 1; the 4th call arrives after the
+  // stream is already dead (is_alive() false) and never reaches try_resend() at
+  // all. The eventual panic is also reflected in the stream's own panic counter,
+  // distinct from is_panic().
+  events.push_back({ WHERE, 0, stream_handle->expect_stream_counters(
+    std::nullopt, /*out_of_history_drop_count=*/ SCU_AS(uint64_t, 3), std::nullopt, std::nullopt,
+        /*panic_count=*/ SCU_AS(uint64_t, 1), /*has_last_panic_time=*/ true) });
   // Tolerant teardown (a panicked stream still emits stray heartbeats); assert close succeeds
   // rather than the exact DISCONNECT handshake packets.
   events.push_back({ WHERE, 0, connection_handle->close_connection(true) });
@@ -2938,6 +3060,13 @@ TEST_F(ScorpioUdpTester, unreliable_stream_missing_middle_fragment_not_delivered
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
     packets[2]) });
   // Stream must not deliver anything.
+  events.push_back({ WHERE, 0, stream_handle->stream_expect_no_receive() });
+  // The two orphaned fragments (0 and 2) are never completed, so they sit in
+  // partial_data until remove_expired_unreliable_data() (run from the stream's
+  // own update(), driven by the connection's heartbeat loop) ages them out.
+  events.push_back({ WHERE, 0, std::make_unique<AdvanceTimeEvent>(SCU_UDP_UNRELIABLE_DATA_EXPIRY_NS + TICK_TIME) });
+  events.push_back({ WHERE, 0, stream_handle->expect_stream_counters(
+    std::nullopt, std::nullopt, /*expired_unreliable_fragment_count=*/ SCU_AS(uint64_t, 2)) });
   events.push_back({ WHERE, 0, stream_handle->stream_expect_no_receive() });
   close_connection(events, connection_handle);
   execute_test(events);

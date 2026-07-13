@@ -111,6 +111,44 @@ TEST(OrdererTest, TooNewAndTooOldElements) {
   EXPECT_EQ(orderer.get_current_index(), 1);
 }
 
+TEST(OrdererTest, ReorderCountTracksOutOfOrderArrivals) {
+  Orderer<int> orderer(4);
+
+  EXPECT_EQ(orderer.get_reorder_count(), 0u);
+
+  // In-order arrival (index == current_index): not a reorder.
+  EXPECT_EQ(orderer.add(0, 10), OrdererAddResult::SUCCESS);
+  EXPECT_EQ(orderer.get_reorder_count(), 0u);
+
+  // Arrives ahead of the current head (index 2, current_index still 1 after
+  // next() below) - buffered ahead of a gap, counts as a reorder.
+  auto next = orderer.next();
+  ASSERT_TRUE(next.has_value());
+  EXPECT_EQ(orderer.get_current_index(), 1);
+  EXPECT_EQ(orderer.add(2, 30), OrdererAddResult::SUCCESS);
+  EXPECT_EQ(orderer.get_reorder_count(), 1u);
+
+  // The call that later fills the gap (index == current_index) is in-order,
+  // not a reorder, even though it lets next() drain the previously-buffered item.
+  EXPECT_EQ(orderer.add(1, 20), OrdererAddResult::SUCCESS);
+  EXPECT_EQ(orderer.get_reorder_count(), 1u);
+
+  // ALREADY_PRESENT/TOO_OLD/TOO_NEW must never increment the reorder count.
+  int dup = 99;
+  EXPECT_EQ(orderer.add(2, dup), OrdererAddResult::ALREADY_PRESENT);
+  EXPECT_EQ(orderer.get_reorder_count(), 1u);
+
+  EXPECT_EQ(orderer.add(0, 99), OrdererAddResult::TOO_OLD);
+  EXPECT_EQ(orderer.get_reorder_count(), 1u);
+
+  EXPECT_EQ(orderer.add(10, 99), OrdererAddResult::TOO_NEW);
+  EXPECT_EQ(orderer.get_reorder_count(), 1u);
+
+  // A second genuinely out-of-order arrival accumulates.
+  EXPECT_EQ(orderer.add(4, 50), OrdererAddResult::SUCCESS);
+  EXPECT_EQ(orderer.get_reorder_count(), 2u);
+}
+
 TEST(OrdererTest, SetSizeWithElements) {
   Orderer<int> orderer(3);
 

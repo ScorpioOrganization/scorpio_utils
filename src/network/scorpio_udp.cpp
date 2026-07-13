@@ -170,6 +170,8 @@ ScorpioUdp::ScorpioUdp(
   _stop(true),
   _logger(logger),
   _panic(false),
+  _panic_count(0),
+  _last_panic_time(0),
   _new_connections(nullptr)
 {
   SCU_LOG_INFO(_logger, "ScorpioUdp created");
@@ -276,6 +278,8 @@ SCU_NORETURN SCU_COLD void ScorpioUdp::panic(std::string&& message) {
   SCU_LOG_FATAL(_logger, "Panic: {}", message);
   SCU_UNLIKELY_THROW_IF(_panic.load(std::memory_order_relaxed), PanicException, );
   _panic_message = std::move(message);
+  _panic_count.fetch_add(1, std::memory_order_relaxed);
+  _last_panic_time.store(_time_provider->get_time(), std::memory_order_relaxed);
   bool expected = false;
   if (_panic.compare_exchange_strong(expected, true, std::memory_order_relaxed, std::memory_order_relaxed)) {
     stop();
@@ -872,6 +876,8 @@ ScorpioUdpConnection::ScorpioUdpConnection(
   _retransmission_count(0),
   _received_bytes(0),
   _send_bytes(0),
+  _panic_count(0),
+  _last_panic_time(0),
   _next_stream_to_heartbeat(0),
   _stream_exists{false},
   _streams_mask_level_2{0},
@@ -1664,6 +1670,8 @@ SCU_COLD void ScorpioUdpConnection::panic_soft(std::string&& message) {
   }
   SCU_LOG_FATAL(_logger, "Connection panic: {}", message);
   _panic_message = std::move(message);
+  _panic_count.fetch_add(1, std::memory_order_relaxed);
+  _last_panic_time.store(_time_provider->get_time(), std::memory_order_relaxed);
   _panic.store(true, std::memory_order_release);
   _state.store(State::ERROR, std::memory_order_relaxed);
   _stop.store(true, std::memory_order_relaxed);
@@ -1678,6 +1686,8 @@ SCU_COLD SCU_NORETURN void ScorpioUdpConnection::panic(std::string&& message) {
   }
   SCU_LOG_FATAL(_logger, "Connection panic: {}", message);
   _panic_message = std::move(message);
+  _panic_count.fetch_add(1, std::memory_order_relaxed);
+  _last_panic_time.store(_time_provider->get_time(), std::memory_order_relaxed);
   _panic.store(true, std::memory_order_release);
   _state.store(State::ERROR, std::memory_order_relaxed);
   _stop.store(true, std::memory_order_relaxed);
@@ -1832,7 +1842,12 @@ ScorpioUdpStream::ScorpioUdpStream(
   _last_greatest_sequence_number(0),
   _stuck_resend_since(),
   _last_heartbeat_time(_parent->_time_provider->get_time()),
-  _closing_since(0) {
+  _closing_since(0),
+  _duplicate_count(0),
+  _out_of_history_drop_count(0),
+  _expired_unreliable_fragment_count(0),
+  _panic_count(0),
+  _last_panic_time(0) {
   SCU_ASSERT(stream_qos.is_reliable() || stream_qos.depth == 0, "Unreliable streams must have depth 0 (no ordering)");
   if (!stream_qos.is_reliable()) {
     _partial_data.emplace<1>();
@@ -1967,6 +1982,8 @@ SCU_COLD void ScorpioUdpStream::panic(std::string&& message) {
   }
   SCU_LOG_FATAL(_logger, "Stream {} panic: {}", _stream_number, message);
   _panic_message = std::move(message);
+  _panic_count.fetch_add(1, std::memory_order_relaxed);
+  _last_panic_time.store(_parent->_time_provider->get_time(), std::memory_order_relaxed);
   _state.store(State::ERROR, std::memory_order_release);
 }
 
@@ -2078,6 +2095,7 @@ void ScorpioUdpStream::remove_expired_unreliable_data() {
     partial_data.received_frames.erase(seq_number);
     partial_data.first_frames.erase(seq_number);
   }
+  _expired_unreliable_fragment_count.fetch_add(SCU_AS(uint64_t, to_remove.size()), std::memory_order_relaxed);
 }
 
 void ScorpioUdpStream::handle_data_packet(const MessageHeader& header, UdpData&& data) {
@@ -2099,10 +2117,13 @@ void ScorpioUdpStream::handle_data_packet(const MessageHeader& header, UdpData&&
     switch (_orderer.add(seq_number, { header, std::move(data.data) })) {
       case OrdererAddResult::TOO_NEW:
         panic("Received packet is too new");
-        [[fallthrough]];
+        return;
       case OrdererAddResult::TOO_OLD: [[fallthrough]];
-      // May be safely ignored
-      case OrdererAddResult::ALREADY_PRESENT: return;
+      // A retransmission of a packet already delivered, or already buffered awaiting
+      // reassembly - safe to ignore, just counted as a duplicate.
+      case OrdererAddResult::ALREADY_PRESENT:
+        _duplicate_count.fetch_add(1, std::memory_order_relaxed);
+        return;
       case OrdererAddResult::SUCCESS: break;
     }
     while (auto packet_opt = _orderer.next()) {
@@ -2141,7 +2162,7 @@ void ScorpioUdpStream::handle_data_packet(const MessageHeader& header, UdpData&&
       }
     );
     if (!inserted_val.second) {
-      // SCU_UNIMPLEMENTED();
+      _duplicate_count.fetch_add(1, std::memory_order_relaxed);
     }
     std::map<size_t, UnreliableData>::iterator start;
     if (header.is_first) {
@@ -2343,6 +2364,7 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
       // yet full - in particular seq 0 stays resendable until it is genuinely overwritten
       // (the old `i <= sat_sub(seq, size)` reported seq 0 as lost from the very first packet).
       if (i + _sent_history.size() < sequence_number) {
+        _out_of_history_drop_count.fetch_add(1, std::memory_order_relaxed);
         return ResendResult::OUT_OF_HISTORY;
       }
       auto& packet = _sent_history[i % _sent_history.size()];
@@ -2350,6 +2372,7 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
         // Slot never written for this seq: either the owning send() allocated the
         // sequence range but is still waiting for the history lock, or the slot
         // was recycled. Not resendable right now - treat like an evicted packet.
+        _out_of_history_drop_count.fetch_add(1, std::memory_order_relaxed);
         return ResendResult::OUT_OF_HISTORY;
       }
       if (now - packet->last_send_time < SCU_UDP_RESEND_INTERVAL) {
