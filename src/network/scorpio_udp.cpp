@@ -164,6 +164,8 @@ ScorpioUdp::ScorpioUdp(
   _socket(socket),
 #endif
   _random_engine(SCU_AS(uint64_t, std::random_device{ }()) << 32 | SCU_AS(uint64_t, std::random_device{ }())),
+  _received_bytes(0),
+  _send_bytes(0),
   _auto_accept(false),
   _stop(true),
   _logger(logger),
@@ -316,6 +318,7 @@ void ScorpioUdp::receiver_thread() {
       // SCU_LOG_TRACE(_logger, "Received from: {}",
       // create_log(result.ok_value().remote_ip, result.ok_value().remote_port, parse_header(data).ok().value(), data));
       data.resize(result.ok_value().byte_count);
+      _received_bytes.fetch_add(data.size(), std::memory_order_relaxed);
       _receiver_channel.send<true>({
         /*._ip   = */ result.ok_value().remote_ip,
         /*._port = */ result.ok_value().remote_port,
@@ -349,6 +352,7 @@ void ScorpioUdp::sender_thread() {
       }
       // SCU_LOG_TRACE(_logger, "Sending to: {}",
       // create_log(msg.ip, msg.port, parse_header(msg.data).ok().value(), msg.data));
+      _send_bytes.fetch_add(msg.data.size(), std::memory_order_relaxed);
       auto result = _socket.send(msg.data.data(), msg.data.size(), msg.ip, msg.port);
       if (SCU_UNLIKELY(result.is_err())) {
         panic(std::move(result).err_value());
@@ -865,6 +869,9 @@ ScorpioUdpConnection::ScorpioUdpConnection(
   _send_heartbeat_count{0},
   _send_partial_heartbeat_count{0},
   _logger(_parent->_logger),
+  _retransmission_count(0),
+  _received_bytes(0),
+  _send_bytes(0),
   _next_stream_to_heartbeat(0),
   _stream_exists{false},
   _streams_mask_level_2{0},
@@ -1425,6 +1432,7 @@ void ScorpioUdpConnection::process_packets(
   SCU_LOG_TRACE(_logger, "Processing packet from {}:{}. Packet size: {} bytes",
       packet.second.ip.str(), packet.second.port, packet.second.data.size());
   _received_packet_count.fetch_add(1, std::memory_order_relaxed);
+  _received_bytes.fetch_add(packet.second.data.size(), std::memory_order_relaxed);
   handle_new_packet(packet.first, std::move(packet.second));
 }
 
@@ -1694,9 +1702,14 @@ bool ScorpioUdpConnection::send(
   if (SCU_UNLIKELY(!_parent->is_running())) {
     return false;
   }
-  return _parent->send(stream_number,
+  if (SCU_UNLIKELY(!_parent->send(stream_number,
     sequence_number.value_or(std::ref(_sequence_number)).get(),
-    code, _remote_ip, _remote_port, data);
+    code, _remote_ip, _remote_port, data))) {
+    SCU_LOG_ERROR(_logger, "Failed to send packet to {}:{}", _remote_ip.str(), _remote_port);
+    return false;
+  }
+  _send_bytes.fetch_add(data.size(), std::memory_order_relaxed);
+  return true;
 }
 
 bool ScorpioUdpConnection::send(std::vector<uint8_t>&& packet) {
@@ -1704,7 +1717,13 @@ bool ScorpioUdpConnection::send(std::vector<uint8_t>&& packet) {
     SCU_LOG_ERROR(_logger, "Failed to send packet because parent socket is not running");
     return false;
   }
-  return _parent->send(_remote_ip, _remote_port, std::move(packet));
+  const auto packet_size = packet.size();
+  if (SCU_UNLIKELY(!_parent->send(_remote_ip, _remote_port, std::move(packet)))) {
+    SCU_LOG_ERROR(_logger, "Failed to send packet to {}:{}", _remote_ip.str(), _remote_port);
+    return false;
+  }
+  _send_bytes.fetch_add(packet_size, std::memory_order_relaxed);
+  return true;
 }
 
 void ScorpioUdpConnection::send_or_panic(

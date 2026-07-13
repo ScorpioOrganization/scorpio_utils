@@ -761,6 +761,68 @@ public:
   ~ExpectNoPacket() override = default;
 };
 
+// Polls ScorpioUdp's socket-level diagnostic counters/state until every
+// provided expectation matches (or max_attempts is exhausted). Unset
+// optionals are not checked. Mirrors ConnectionHandle::ExpectCounters but
+// operates on the socket handed to every EventInTime::execute().
+class ExpectSocketCounters final : public EventInTime {
+  const std::optional<uint64_t> _send_bytes;
+  const std::optional<uint64_t> _received_bytes;
+  const std::optional<bool> _auto_accept;
+  // Lower bound on send_bytes, for flows where the exact total is not
+  // predictable because the connection's own periodic HEARTBEAT traffic (not
+  // controlled by the test) also counts against it.
+  const std::optional<uint64_t> _min_send_bytes;
+  const int64_t _period;
+  const size_t _max_attempts;
+
+  static bool matches(const std::optional<uint64_t>& expected, uint64_t actual) noexcept {
+    return !expected.has_value() || *expected == actual;
+  }
+  static bool matches(const std::optional<bool>& expected, bool actual) noexcept {
+    return !expected.has_value() || *expected == actual;
+  }
+  static bool matches_min(const std::optional<uint64_t>& min, uint64_t actual) noexcept {
+    return !min.has_value() || actual >= *min;
+  }
+
+public:
+  explicit ExpectSocketCounters(
+    std::optional<uint64_t> send_bytes = std::nullopt,
+    std::optional<uint64_t> received_bytes = std::nullopt,
+    std::optional<bool> auto_accept = std::nullopt,
+    std::optional<uint64_t> min_send_bytes = std::nullopt,
+    int64_t period = TICK_TIME, size_t max_attempts = 20)
+  : _send_bytes(send_bytes), _received_bytes(received_bytes), _auto_accept(auto_accept),
+    _min_send_bytes(min_send_bytes), _period(period), _max_attempts(max_attempts) { }
+
+  Expected<Success, std::string> execute(
+    int64_t,
+    UdpSocket&,
+    std::shared_ptr<ScorpioUdp> scorpio_udp
+  ) override {
+    const auto time_provider = ScorpioUdp::get_time_provider();
+    for (size_t attempt = 0; attempt < _max_attempts; ++attempt) {
+      if (matches(_send_bytes, scorpio_udp->send_bytes()) &&
+        matches(_received_bytes, scorpio_udp->received_bytes()) &&
+        matches(_auto_accept, scorpio_udp->is_auto_accept()) &&
+        matches_min(_min_send_bytes, scorpio_udp->send_bytes())) {
+        return Success();
+      }
+      time_provider->advance_time(_period);
+      std::this_thread::sleep_for(std::chrono::nanoseconds(_period));
+    }
+    return Unexpected("Socket counters expectation not met: send_bytes="s +
+      std::to_string(scorpio_udp->send_bytes()) + ", received_bytes=" +
+      std::to_string(scorpio_udp->received_bytes()) + ", is_auto_accept=" +
+      std::to_string(scorpio_udp->is_auto_accept()));
+  }
+  std::string name() override {
+    return "ExpectSocketCounters"s;
+  }
+  ~ExpectSocketCounters() override = default;
+};
+
 class ConnectionHandle final : public std::enable_shared_from_this<ConnectionHandle> {
   friend class StreamHandle;
   std::optional<std::shared_ptr<ScorpioUdpConnection>> _connection;
@@ -1099,6 +1161,119 @@ public:
   std::unique_ptr<ExpectHeartbeat> expect_heartbeat(int64_t period = TICK_TIME, size_t max_attempts = 20) {
     return std::unique_ptr<ExpectHeartbeat>(
       new ExpectHeartbeat(shared_from_this(), period, max_attempts));
+  }
+
+  // Polls the connection's diagnostic counters until every provided
+  // expectation matches (or max_attempts is exhausted). Unset optionals are
+  // not checked.
+  class ExpectCounters final : public EventInTime {
+    friend class ConnectionHandle;
+    const std::shared_ptr<ConnectionHandle> _handle;
+    const std::optional<uint64_t> _send_bytes;
+    const std::optional<uint64_t> _received_bytes;
+    const std::optional<uint64_t> _retransmission_count;
+    const std::optional<uint64_t> _received_packet_count;
+    const std::optional<uint64_t> _received_heartbeat_count;
+    const std::optional<uint64_t> _send_heartbeat_count;
+    const std::optional<uint64_t> _send_partial_heartbeat_count;
+    // Checks .has_value() on last_heartbeat_time()/last_received_packet_time()
+    // rather than an exact timestamp, since the mock clock value at the moment
+    // a background thread processes a packet is not something the caller can
+    // predict precisely.
+    const std::optional<bool> _has_last_heartbeat_time;
+    const std::optional<bool> _has_last_received_packet_time;
+    // Lower bound on send_bytes, for flows where the exact total is not
+    // predictable because the connection's own periodic HEARTBEAT traffic (not
+    // controlled by the test) also counts against it.
+    const std::optional<uint64_t> _min_send_bytes;
+    const int64_t _period;
+    const size_t _max_attempts;
+
+    ExpectCounters(
+      std::shared_ptr<ConnectionHandle> handle,
+      std::optional<uint64_t> send_bytes, std::optional<uint64_t> received_bytes,
+      std::optional<uint64_t> retransmission_count, std::optional<uint64_t> received_packet_count,
+      std::optional<uint64_t> received_heartbeat_count, std::optional<uint64_t> send_heartbeat_count,
+      std::optional<uint64_t> send_partial_heartbeat_count,
+      std::optional<bool> has_last_heartbeat_time, std::optional<bool> has_last_received_packet_time,
+      std::optional<uint64_t> min_send_bytes,
+      int64_t period, size_t max_attempts)
+    : _handle(std::move(handle)), _send_bytes(send_bytes), _received_bytes(received_bytes),
+      _retransmission_count(retransmission_count), _received_packet_count(received_packet_count),
+      _received_heartbeat_count(received_heartbeat_count), _send_heartbeat_count(send_heartbeat_count),
+      _send_partial_heartbeat_count(send_partial_heartbeat_count),
+      _has_last_heartbeat_time(has_last_heartbeat_time),
+      _has_last_received_packet_time(has_last_received_packet_time),
+      _min_send_bytes(min_send_bytes),
+      _period(period), _max_attempts(max_attempts) { }
+
+    static bool matches(const std::optional<uint64_t>& expected, uint64_t actual) noexcept {
+      return !expected.has_value() || *expected == actual;
+    }
+    static bool matches(const std::optional<bool>& expected, bool actual) noexcept {
+      return !expected.has_value() || *expected == actual;
+    }
+    static bool matches_min(const std::optional<uint64_t>& min, uint64_t actual) noexcept {
+      return !min.has_value() || actual >= *min;
+    }
+
+public:
+    Expected<Success, std::string> execute(
+      int64_t,
+      UdpSocket&,
+      std::shared_ptr<ScorpioUdp>
+    ) override {
+      SCU_ASSERT(_handle->_connection.has_value(), "Handle does not contain a connection");
+      const auto& conn = *(_handle->_connection);
+      const auto time_provider = ScorpioUdp::get_time_provider();
+      for (size_t attempt = 0; attempt < _max_attempts; ++attempt) {
+        if (matches(_send_bytes, conn->send_bytes()) &&
+          matches(_received_bytes, conn->received_bytes()) &&
+          matches(_retransmission_count, conn->retransmission_count()) &&
+          matches(_received_packet_count, conn->received_packet_count()) &&
+          matches(_received_heartbeat_count, conn->received_heartbeat_count()) &&
+          matches(_send_heartbeat_count, conn->send_heartbeat_count()) &&
+          matches(_send_partial_heartbeat_count, conn->send_partial_heartbeat_count()) &&
+          matches(_has_last_heartbeat_time, conn->last_heartbeat_time().has_value()) &&
+          matches(_has_last_received_packet_time, conn->last_received_packet_time().has_value()) &&
+          matches_min(_min_send_bytes, conn->send_bytes())) {
+          return Success();
+        }
+        time_provider->advance_time(_period);
+        std::this_thread::sleep_for(std::chrono::nanoseconds(_period));
+      }
+      return Unexpected("Connection counters expectation not met: send_bytes="s +
+        std::to_string(conn->send_bytes()) + ", received_bytes=" + std::to_string(conn->received_bytes()) +
+        ", retransmission_count=" + std::to_string(conn->retransmission_count()) +
+        ", received_packet_count=" + std::to_string(conn->received_packet_count()) +
+        ", received_heartbeat_count=" + std::to_string(conn->received_heartbeat_count()) +
+        ", send_heartbeat_count=" + std::to_string(conn->send_heartbeat_count()) +
+        ", send_partial_heartbeat_count=" + std::to_string(conn->send_partial_heartbeat_count()) +
+        ", has_last_heartbeat_time=" + std::to_string(conn->last_heartbeat_time().has_value()) +
+        ", has_last_received_packet_time=" + std::to_string(conn->last_received_packet_time().has_value()));
+    }
+    std::string name() override {
+      return "ExpectCounters"s;
+    }
+    ~ExpectCounters() override = default;
+  };
+
+  std::unique_ptr<ExpectCounters> expect_counters(
+    std::optional<uint64_t> send_bytes = std::nullopt,
+    std::optional<uint64_t> received_bytes = std::nullopt,
+    std::optional<uint64_t> retransmission_count = std::nullopt,
+    std::optional<uint64_t> received_packet_count = std::nullopt,
+    std::optional<uint64_t> received_heartbeat_count = std::nullopt,
+    std::optional<uint64_t> send_heartbeat_count = std::nullopt,
+    std::optional<uint64_t> send_partial_heartbeat_count = std::nullopt,
+    std::optional<bool> has_last_heartbeat_time = std::nullopt,
+    std::optional<bool> has_last_received_packet_time = std::nullopt,
+    std::optional<uint64_t> min_send_bytes = std::nullopt,
+    int64_t period = TICK_TIME, size_t max_attempts = 20) {
+    return std::unique_ptr<ExpectCounters>(new ExpectCounters(
+      shared_from_this(), send_bytes, received_bytes, retransmission_count, received_packet_count,
+      received_heartbeat_count, send_heartbeat_count, send_partial_heartbeat_count,
+      has_last_heartbeat_time, has_last_received_packet_time, min_send_bytes, period, max_attempts));
   }
 };
 
@@ -1913,6 +2088,17 @@ void close_connection(std::vector<EventQueueItem>& events, const std::shared_ptr
   events.push_back({ WHERE, 0, connection_handle->expect_disconnect(Code::DisconnectSubCommands::ACCEPTED) });
 }
 
+TEST_F(ScorpioUdpTester, auto_accept_default_and_toggle) {
+  std::vector<EventQueueItem> events;
+  events.push_back({ WHERE, 0, std::make_unique<StartScorpioUdp>() });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectSocketCounters>(
+    std::nullopt, std::nullopt, /*auto_accept=*/ false) });
+  events.push_back({ WHERE, 0, std::make_unique<SetAutoAccept>(true) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectSocketCounters>(
+    std::nullopt, std::nullopt, /*auto_accept=*/ true) });
+  execute_test(events);
+}
+
 TEST_F(ScorpioUdpTester, connect_and_get_closed) {
   std::vector<EventQueueItem> events;
   auto connection_handle = create_connection(events);
@@ -1987,6 +2173,58 @@ TEST_F(ScorpioUdpTester, accept_connection_and_close) {
   execute_test(events);
 }
 
+// Traces the exact boundary the diagnostic counters draw: CONNECT/DISCONNECT
+// are "connectionless" commands handled entirely inside ScorpioUdp itself and
+// never routed through a ScorpioUdpConnection's own send()/_incoming_packets,
+// so the accepted connection's received-side counters stay at exactly 0
+// across the handshake (nothing not-connectionless was ever received). The
+// send side can't be pinned to an exact value the same way: a connection
+// starts overdue for its very first HEARTBEAT the instant it's created (mock
+// time is already at TICK_TIME by then), and that heartbeat *does* count
+// against send_bytes -- so send-side assertions use a lower bound instead. A
+// *locally-initiated* close() is the one path (unlike the inbound CONNECT
+// handshake or a peer-initiated disconnect) whose DISCONNECT routes through
+// ScorpioUdpConnection::send(), which does count.
+TEST_F(ScorpioUdpTester, accept_connection_and_close_tracks_counters) {
+  std::shared_ptr<ConnectionHandle> connection_handle = ConnectionHandle::create();
+  std::vector<EventQueueItem> events;
+  events.push_back({ WHERE, 0, std::make_unique<StartScorpioUdp>() });
+  events.push_back({ WHERE, 0, std::make_unique<StartListening>(Ipv4(127, 0, 0, 1), 10001) });
+  events.push_back({ WHERE, 0, std::make_unique<SetAutoAccept>(true) });
+  const auto connect_packet = generate_single_packet(Code::CONNECT,
+    id_payload(AS_BYTE(Code::ConnectSubCommands::CONNECT), TEST_PEER_CONNECTION_ID));
+  const auto accepted_packet = generate_single_packet(Code::CONNECT,
+    id_payload(AS_BYTE(Code::ConnectSubCommands::ACCEPTED), TEST_PEER_CONNECTION_ID));
+  events.push_back({ WHERE, TICK_TIME, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345, connect_packet) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345, accepted_packet) });
+  events.push_back({ WHERE, 0, connection_handle->get_connection(true) });
+  events.push_back({ WHERE, 0, connection_handle->connection_is_alive(true) });
+
+  events.push_back({ WHERE, 0, connection_handle->expect_counters(
+    std::nullopt, SCU_AS(uint64_t, 0), std::nullopt, SCU_AS(uint64_t, 0)) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectSocketCounters>(
+    std::nullopt, connect_packet.size(), std::nullopt, /*min_send_bytes=*/ accepted_packet.size()) });
+
+  events.push_back({ WHERE, 0, connection_handle->close_connection(true) });
+  // Incoming connection adopts the peer's id, so the local-close DISCONNECT carries it.
+  const auto disconnect_payload =
+    id_payload(AS_BYTE(Code::DisconnectSubCommands::DISCONNECT), TEST_PEER_CONNECTION_ID);
+  const auto disconnect_packet = generate_single_packet(Code::DISCONNECT, disconnect_payload);
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345, disconnect_packet) });
+
+  // ScorpioUdpConnection::send(Code, data) counts the *payload* handed to it
+  // (disconnect_payload), not the full wire packet with its 1-byte command
+  // header -- unlike the receive side and unlike stream sends (which build
+  // full packets themselves and go through the raw-packet send() overload).
+  events.push_back({ WHERE, 0, connection_handle->expect_counters(
+    std::nullopt, SCU_AS(uint64_t, 0), std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+    std::nullopt, std::nullopt, /*min_send_bytes=*/ disconnect_payload.size()) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectSocketCounters>(
+    std::nullopt, connect_packet.size(), std::nullopt,
+        /*min_send_bytes=*/ accepted_packet.size() + disconnect_packet.size()) });
+  execute_test(events);
+}
+
 TEST_F(ScorpioUdpTester, reject_connection) {
   std::shared_ptr<ConnectionHandle> connection_handle = ConnectionHandle::create();
   std::vector<EventQueueItem> events;
@@ -2058,6 +2296,33 @@ TEST_F(ScorpioUdpTester, heartbeat_emitted_periodically) {
   // A bare heartbeat with no streams: code byte (HEARTBEAT|FIRST=0x45) + connection id.
   events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
     generate_single_packet(Code::HEARTBEAT, heartbeat_payload())) });
+  close_connection(events, connection_handle);
+  execute_test(events);
+}
+
+TEST_F(ScorpioUdpTester, heartbeat_emitted_periodically_tracks_heartbeat_counters) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  const auto bare_heartbeat = generate_single_packet(Code::HEARTBEAT, heartbeat_payload());
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345, bare_heartbeat) });
+  // A bare heartbeat (no streams to append data for) never sets the "ran out of
+  // room" partial flag.
+  events.push_back({ WHERE, 0, connection_handle->expect_counters(
+    std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        /*received_heartbeat_count=*/ SCU_AS(uint64_t, 0), /*send_heartbeat_count=*/ SCU_AS(uint64_t, 1),
+        /*send_partial_heartbeat_count=*/ SCU_AS(uint64_t, 0)) });
+
+  // Peer replies with its own bare heartbeat. Unlike CONNECT/DISCONNECT,
+  // HEARTBEAT is not a connectionless command, so it reaches the connection's
+  // own _incoming_packets queue and moves the connection-level counters.
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345, bare_heartbeat) });
+  events.push_back({ WHERE, 0, connection_handle->expect_counters(
+    std::nullopt, /*received_bytes=*/ bare_heartbeat.size(), std::nullopt,
+        /*received_packet_count=*/ SCU_AS(uint64_t, 1), /*received_heartbeat_count=*/ SCU_AS(uint64_t, 1),
+    std::nullopt, std::nullopt,
+        /*has_last_heartbeat_time=*/ true, /*has_last_received_packet_time=*/ true) });
+
   close_connection(events, connection_handle);
   execute_test(events);
 }
@@ -2248,6 +2513,41 @@ TEST_F(ScorpioUdpTester, reliable_stream_send_emits_stream_data) {
   execute_test(events);
 }
 
+// CREATE_STREAM and STREAM_DATA are not connectionless commands (unlike
+// CONNECT/DISCONNECT), so both go through ScorpioUdpConnection::send() and
+// count against the connection's own send_bytes.
+TEST_F(ScorpioUdpTester, reliable_stream_send_emits_stream_data_tracks_byte_counters) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  constexpr StreamNumber kStreamId = 1;
+  constexpr uint16_t kDepth = 16;
+  auto stream_handle = create_outgoing_reliable_stream(events, connection_handle, kStreamId, kDepth);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  std::vector<uint8_t> payload{ 0x01, 0x02, 0x03 };
+  events.push_back({ WHERE, 0, stream_handle->stream_send(payload) });
+  events.push_back({ WHERE, 0, stream_handle->expect_stream_data(0, payload) });
+
+  // The wire size of CREATE_STREAM/STREAM_DATA does not depend on the actual
+  // (random) epoch or connection id values -- both are fixed-width fields --
+  // so placeholders are enough to compute the expected byte totals. The ACCEPT
+  // response create_outgoing_reliable_stream() injects shares CREATE_STREAM's
+  // layout (only the subcommand byte differs), so it has the same size and is
+  // the sole contributor to received_bytes/received_packet_count here.
+  const ScorpioUdpStream::StreamQoS qos{ kDepth, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED };
+  const uint64_t create_stream_size = generate_single_packet(Code::CREATE_STREAM,
+    create_stream_payload(kStreamId, qos, Code::CreateStreamSubCommands::CREATE, SCU_AS(StreamEpoch, 0),
+      TEST_PEER_CONNECTION_ID)).size();
+  const uint64_t stream_data_size = stream_data_packet(kStreamId, 0, payload, SCU_AS(StreamEpoch, 0)).size();
+  // send_bytes uses a lower bound, not exact equality: the connection also
+  // sends its own periodic HEARTBEAT traffic (uncontrolled by this test),
+  // which adds to send_bytes too.
+  events.push_back({ WHERE, 0, connection_handle->expect_counters(
+    std::nullopt, create_stream_size, std::nullopt, SCU_AS(uint64_t, 1), std::nullopt, std::nullopt, std::nullopt,
+    std::nullopt, std::nullopt, /*min_send_bytes=*/ create_stream_size + stream_data_size) });
+  close_connection(events, connection_handle);
+  execute_test(events);
+}
+
 TEST_F(ScorpioUdpTester, reliable_stream_send_fragmented_emits_multiple_packets) {
   std::vector<EventQueueItem> events;
   auto connection_handle = create_connection(events);
@@ -2291,6 +2591,72 @@ TEST_F(ScorpioUdpTester, reliable_stream_retransmits_on_heartbeat_gap) {
   events.push_back({ WHERE, SCU_UDP_RESEND_INTERVAL,
       stream_handle->inject_heartbeat(/*initial_end=*/ 1, /*held_ranges=*/ { { 2u, 3u } }) });
   events.push_back({ WHERE, 0, stream_handle->expect_stream_data(1, payloads[1]) });
+  close_connection(events, connection_handle);
+  execute_test(events);
+}
+
+// retransmission_count predates this diff and had zero test coverage before now.
+TEST_F(ScorpioUdpTester, reliable_stream_retransmits_on_heartbeat_gap_updates_retransmission_count) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = create_outgoing_reliable_stream(events, connection_handle, 1, 16);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+
+  std::vector<std::vector<uint8_t>> payloads = {
+    { 0x01, 0x01 }, { 0x02, 0x02 }, { 0x03, 0x03 },
+  };
+  for (auto& p : payloads) {
+    events.push_back({ WHERE, 0, stream_handle->stream_send(p) });
+  }
+  for (SeqNumber seq = 0; seq < 3; ++seq) {
+    events.push_back({ WHERE, 0, stream_handle->expect_stream_data(seq, payloads[seq]) });
+  }
+  events.push_back({ WHERE, 0, connection_handle->expect_counters(
+    std::nullopt, std::nullopt, /*retransmission_count=*/ SCU_AS(uint64_t, 0)) });
+
+  events.push_back({ WHERE, SCU_UDP_RESEND_INTERVAL,
+      stream_handle->inject_heartbeat(/*initial_end=*/ 1, /*held_ranges=*/ { { 2u, 3u } }) });
+  events.push_back({ WHERE, 0, stream_handle->expect_stream_data(1, payloads[1]) });
+  events.push_back({ WHERE, 0, connection_handle->expect_counters(
+    std::nullopt, std::nullopt, /*retransmission_count=*/ SCU_AS(uint64_t, 1)) });
+  close_connection(events, connection_handle);
+  execute_test(events);
+}
+
+// Sends accumulate rather than get overwritten by the latest (smaller) value.
+TEST_F(ScorpioUdpTester, reliable_stream_multiple_sends_accumulate_byte_counters) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  constexpr StreamNumber kStreamId = 1;
+  constexpr uint16_t kDepth = 16;
+  auto stream_handle = create_outgoing_reliable_stream(events, connection_handle, kStreamId, kDepth);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+
+  std::vector<std::vector<uint8_t>> payloads = {
+    { 0x01 }, { 0x02 }, { 0x03 },
+  };
+  for (auto& p : payloads) {
+    events.push_back({ WHERE, 0, stream_handle->stream_send(p) });
+  }
+  for (SeqNumber seq = 0; seq < 3; ++seq) {
+    events.push_back({ WHERE, 0, stream_handle->expect_stream_data(seq, payloads[seq]) });
+  }
+
+  const ScorpioUdpStream::StreamQoS qos{ kDepth, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED };
+  const uint64_t create_stream_size = generate_single_packet(Code::CREATE_STREAM,
+    create_stream_payload(kStreamId, qos, Code::CreateStreamSubCommands::CREATE, SCU_AS(StreamEpoch, 0),
+      TEST_PEER_CONNECTION_ID)).size();
+  uint64_t min_expected_send_bytes = create_stream_size;
+  for (SeqNumber seq = 0; seq < 3; ++seq) {
+    min_expected_send_bytes += stream_data_packet(kStreamId, seq, payloads[seq], SCU_AS(StreamEpoch, 0)).size();
+  }
+  // received_bytes/received_packet_count are pinned exactly to the single
+  // CREATE_STREAM ACCEPT injected by create_outgoing_reliable_stream() (same
+  // wire size as CREATE); send_bytes uses a lower bound since the
+  // connection's own periodic HEARTBEAT traffic also counts against it.
+  events.push_back({ WHERE, 0, connection_handle->expect_counters(
+    std::nullopt, create_stream_size, std::nullopt, SCU_AS(uint64_t, 1), std::nullopt, std::nullopt, std::nullopt,
+    std::nullopt, std::nullopt, /*min_send_bytes=*/ min_expected_send_bytes) });
   close_connection(events, connection_handle);
   execute_test(events);
 }

@@ -403,13 +403,15 @@ private:
   std::atomic<int64_t> _last_received_packet_time;
   std::atomic<size_t> _received_packet_count;
   std::atomic<int64_t> _last_received_heartbeat_time;
-  std::atomic<size_t> _received_heartbeat_count;
-  std::atomic<size_t> _send_heartbeat_count;
-  std::atomic<size_t> _send_partial_heartbeat_count;
+  std::atomic<uint64_t> _received_heartbeat_count;
+  std::atomic<uint64_t> _send_heartbeat_count;
+  std::atomic<uint64_t> _send_partial_heartbeat_count;
   std::mutex _panic_mutex;
   threading::Signal _start_signal;
   std::shared_ptr<logger::Logger> _logger;
-  std::atomic<size_t> _retransmission_count;
+  std::atomic<uint64_t> _retransmission_count;
+  std::atomic<uint64_t> _received_bytes;
+  std::atomic<uint64_t> _send_bytes;
 
   uint16_t _next_stream_to_heartbeat;
   std::mutex _close_mutex;
@@ -549,6 +551,12 @@ public:
   SCU_ALWAYS_INLINE auto retransmission_count() const noexcept {
     return _retransmission_count.load(std::memory_order_relaxed);
   }
+  SCU_ALWAYS_INLINE auto received_bytes() const noexcept {
+    return _received_bytes.load(std::memory_order_relaxed);
+  }
+  SCU_ALWAYS_INLINE auto send_bytes() const noexcept {
+    return _send_bytes.load(std::memory_order_relaxed);
+  }
   SCU_ALWAYS_INLINE void set_logger(std::shared_ptr<logger::Logger> logger) noexcept {
     _logger = std::move(logger);
   }
@@ -577,6 +585,8 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   std::mutex _random_engine_mutex;
   std::mt19937_64 _random_engine;
   std::atomic<size_t> _mock_sequence_number;
+  std::atomic<uint64_t> _received_bytes;
+  std::atomic<uint64_t> _send_bytes;
   std::atomic<bool> _auto_accept;
   std::atomic<bool> _stop;
   threading::Signal _start_signal;
@@ -695,6 +705,18 @@ public:
 
   SCU_ALWAYS_INLINE auto is_running() const noexcept {
     return _stop.load(std::memory_order_relaxed) == false;
+  }
+
+  SCU_ALWAYS_INLINE auto received_bytes() const noexcept {
+    return _received_bytes.load(std::memory_order_relaxed);
+  }
+
+  SCU_ALWAYS_INLINE auto send_bytes() const noexcept {
+    return _send_bytes.load(std::memory_order_relaxed);
+  }
+
+  SCU_ALWAYS_INLINE auto is_auto_accept() const noexcept {
+    return _auto_accept.load(std::memory_order_relaxed);
   }
 
   SCU_ALWAYS_INLINE auto set_auto_accept(bool auto_accept) noexcept {

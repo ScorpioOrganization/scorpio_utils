@@ -147,6 +147,52 @@ TEST(MockScorpioUdp, SendDataOrder) {
   }
 }
 
+// Smoke test for the byte counters over the real UdpSocket/sender_thread/
+// receiver_thread path (the framework build's scripted queues bypass this).
+// Bounds are loose, not exact, since the mock link's delay/loss and periodic
+// heartbeats make an exact byte total nondeterministic here.
+TEST(MockScorpioUdp, ByteCountersTrackTraffic) {
+  const auto [client_connection, server_connection] = get_client_server_connection(PORT);
+  ASSERT_TRUE(client_connection);
+  ASSERT_TRUE(server_connection);
+  server_connection->set_auto_accept_stream(true);
+  client_connection->set_auto_accept_stream(true);
+  auto server_stream =
+    server_connection->create_stream(1, { 100, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED });
+  std::this_thread::sleep_for(std::chrono::seconds(3));
+  ASSERT_TRUE(server_stream);
+  ASSERT_TRUE(server_stream->is_active()) << SCU_AS(int, server_stream->state());
+  auto client_stream_opt = client_connection->get_accepted_stream();
+  ASSERT_TRUE(client_stream_opt.has_value());
+  ASSERT_TRUE(client_stream_opt.value()->is_active());
+  auto client_stream = std::move(client_stream_opt).value();
+
+  const std::vector<uint8_t> payload(64, 0x42);
+  constexpr size_t kMessages = 50;
+  const auto client_send_bytes_before = client_connection->send_bytes();
+  const auto server_received_bytes_before = server_connection->received_bytes();
+  for (size_t i = 0; i < kMessages; ++i) {
+    ASSERT_TRUE(client_stream->send(payload));
+  }
+  for (size_t i = 0; i < kMessages; ++i) {
+    auto received_data = server_stream->receive<true>();
+    ASSERT_EQ(received_data, payload);
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  // Byte counters grow by at least the raw payload bytes sent/received (wire
+  // packets also carry protocol headers on top).
+  const auto client_send_delta = client_connection->send_bytes() - client_send_bytes_before;
+  const auto server_received_delta = server_connection->received_bytes() - server_received_bytes_before;
+  EXPECT_GE(client_send_delta, payload.size() * kMessages);
+  EXPECT_GE(server_received_delta, payload.size() * kMessages);
+
+  // Socket-level counters see every packet on the socket (handshake,
+  // heartbeats, ...), so they can only be a superset of one connection's.
+  EXPECT_GE(client_connection->get_socket()->send_bytes(), client_connection->send_bytes());
+  EXPECT_GE(server_connection->get_socket()->received_bytes(), server_connection->received_bytes());
+}
+
 // TEST(MockScorpioUdp, LargePacket) {
 // const auto [client_connection, server_connection] = get_client_server_connection(PORT);
 // ASSERT_TRUE(client_connection);
