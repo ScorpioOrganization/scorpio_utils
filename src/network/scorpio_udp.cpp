@@ -37,6 +37,7 @@ using scorpio_utils::network::StreamNumber;
 using scorpio_utils::network::UdpData;
 using scorpio_utils::network::TimeProvider;
 using scorpio_utils::network::StreamEpoch;
+using scorpio_utils::network::SendOutcome;
 
 static_assert(sizeof(Code::ConnectSubCommands) == 1, "ConnectSubCommands size is assumed to be 1 byte");
 static_assert(sizeof(Code::DisconnectSubCommands) == 1, "DisconnectSubCommands size is assumed to be 1 byte");
@@ -194,25 +195,40 @@ bool ScorpioUdp::send(
   Port remote_port,
   std::vector<uint8_t>&& packet
 ) {
+  return send_impl(remote_ip, remote_port, std::move(packet), true) == SendOutcome::SENT;
+}
+
+SendOutcome ScorpioUdp::send_impl(
+  Ipv4 remote_ip,
+  Port remote_port,
+  std::vector<uint8_t>&& packet,
+  bool block
+) {
   if (SCU_UNLIKELY(!_socket.is_open())) {
     SCU_LOG_ERROR(_logger, "Failed to send packet because socket is not open");
-    return false;
+    return SendOutcome::CLOSED;
   }
   SCU_ASSERT(!packet.empty(), "Attempted to send an empty packet");
   // Control traffic (heartbeats, handshakes, closes) gets its own queue so bulk
   // STREAM_DATA cannot starve it - the sender thread drains control first.
   const bool is_control = Code(packet[0]).get_command() != Code::STREAM_DATA;
+  auto& channel = is_control ? _control_sender_channel : _sender_channel;
   try {
-    (is_control ? _control_sender_channel : _sender_channel).send<true>({
+    UdpData message{
       /*._ip =   */ remote_ip,
       /*._port = */ remote_port,
       /*._data = */ std::move(packet),
-      });
+    };
+    if (block) {
+      channel.send<true>(std::move(message));
+    } else if (SCU_UNLIKELY(channel.send<false>(std::move(message)).has_value())) {
+      return SendOutcome::FULL;
+    }
   } catch (const threading::ClosedChannelException&) {
     SCU_LOG_ERROR(_logger, "Failed to send packet because sender channel is closed");
-    return false;
+    return SendOutcome::CLOSED;
   }
-  return true;
+  return SendOutcome::SENT;
 }
 
 bool ScorpioUdp::stop() {
@@ -616,6 +632,20 @@ SCU_HOT void ScorpioUdp::process_packet(UdpData udp_data) {
     default: {
         auto connection_opt = get_connection(udp_data.ip, udp_data.port);
         if (connection_opt != nullptr && connection_opt->state() == ScorpioUdpConnection::State::CONNECTED) {
+          if (header.command == Code::HEARTBEAT) {
+            // Routing-time liveness refresh: heartbeats lead with the connection id,
+            // so it can be validated right here, without the connection's processing
+            // thread. This keeps a backlogged connection (deep _incoming_packets
+            // queue) from false-panicking with "no packets received" while valid
+            // heartbeats are in fact arriving. A mismatched id never refreshes
+            // liveness - the handler drops such heartbeats entirely, as before.
+            ConnectionId heartbeat_connection_id;
+            size_t connection_id_offset = header.data_offset;
+            if (scorpio_utils::network::network_to_host(udp_data.data, &heartbeat_connection_id,
+              connection_id_offset) && heartbeat_connection_id == connection_opt->connection_id()) {
+              connection_opt->note_liveness();
+            }
+          }
           connection_opt->_incoming_packets.send<true>({ header, std::move(udp_data) });
         } else if (connection_opt == nullptr && header.command == Code::HEARTBEAT) {
           // A heartbeat from a peer we have no connection for means the peer still
@@ -668,7 +698,8 @@ void ScorpioUdp::reply_unknown_connection_heartbeat(const MessageHeader& header,
   SCU_DO_AND_ASSERT(scorpio_utils::network::host_to_network(connection_id, data, data_offset),
     "Failed to serialize connection_id for ALREADY_DISCONNECTED reply");
   // Best effort: if this cannot be sent the peer just falls back to its timeout.
-  if (SCU_UNLIKELY(!send(std::nullopt, _mock_sequence_number, Code::DISCONNECT, udp_data.ip, udp_data.port, data))) {
+  if (SCU_UNLIKELY(send(std::nullopt, _mock_sequence_number, Code::DISCONNECT, udp_data.ip, udp_data.port, data,
+    false) != SendOutcome::SENT)) {
     SCU_LOG_WARNING(_logger, "Failed to send ALREADY_DISCONNECTED reply to {}:{}",
       udp_data.ip.str(), udp_data.port);
   }
@@ -807,25 +838,29 @@ SCU_HOT std::optional<std::pair<size_t, std::vector<std::vector<uint8_t>>>> gene
   return { { first_packet_seq, packets } };
 }
 
-bool ScorpioUdp::send(
+SendOutcome ScorpioUdp::send(
   std::optional<StreamNumber> stream_number,
   std::atomic<size_t>& sequence_number,
   Code code,
   Ipv4 remote_ip,
   Port remote_port,
-  const std::vector<uint8_t>& data
+  const std::vector<uint8_t>& data,
+  bool block
 ) {
   auto packets = generate_packets(stream_number, sequence_number, code, data, std::nullopt);
   if (SCU_UNLIKELY(!packets.has_value())) {
-    return false;
+    return SendOutcome::CLOSED;
   }
   for (auto& packet : packets->second) {
-    if (SCU_UNLIKELY(!send(remote_ip, remote_port, std::move(packet)))) {
-      SCU_LOG_ERROR(_logger, "Failed to send packet to {}:{}", remote_ip.str(), remote_port);
-      return false;
+    const auto outcome = send_impl(remote_ip, remote_port, std::move(packet), block);
+    if (SCU_UNLIKELY(outcome != SendOutcome::SENT)) {
+      if (outcome == SendOutcome::CLOSED) {
+        SCU_LOG_ERROR(_logger, "Failed to send packet to {}:{}", remote_ip.str(), remote_port);
+      }
+      return outcome;
     }
   }
-  return true;
+  return SendOutcome::SENT;
 }
 
 void ScorpioUdp::send_or_panic(
@@ -836,8 +871,16 @@ void ScorpioUdp::send_or_panic(
   Port remote_port,
   const std::vector<uint8_t>& data,
   std::string&& panic_message) {
-  if (SCU_UNLIKELY(!send(stream_number, sequence_number, code, remote_ip, remote_port, data))) {
-    panic(std::move(panic_message));
+  switch (send(stream_number, sequence_number, code, remote_ip, remote_port, data, false)) {
+    case SendOutcome::SENT:
+      break;
+    case SendOutcome::FULL:
+      // Deliberate drop: the peer retries these replies, and blocking the socket
+      // processing thread would stall packet routing for every connection.
+      SCU_LOG_WARNING(_logger, "Sender queue full - dropped reply to {}:{}", remote_ip.str(), remote_port);
+      break;
+    case SendOutcome::CLOSED:
+      panic(std::move(panic_message));
   }
 }
 
@@ -1296,7 +1339,7 @@ void ScorpioUdpConnection::close_stream_packet_handler(const MessageHeader& head
                                                  response_offset), "Failed to convert stream number to network format");
         SCU_DO_AND_ASSERT(host_to_network<StreamEpoch>(stream_epoch, response,
                                                  response_offset), "Failed to convert stream epoch to network format");
-        send(Code::CLOSE_STREAM, response, stream_number);
+        send(Code::CLOSE_STREAM, response, stream_number, std::nullopt, false);
       } break;
     case Code::CloseStreamSubCommands::CLOSED: {
         if (epoch_matches) {
@@ -1360,8 +1403,8 @@ void ScorpioUdpConnection::heartbeat_packet_handler(const MessageHeader& header,
       // live stream incarnation or the peer will (correctly) ignore it.
       SCU_DO_AND_ASSERT(host_to_network<StreamEpoch>(stream_epoch, response, response_offset),
         "Failed to convert stream epoch to network format for CLOSE_STREAM ALREADY_CLOSED response");
-      if (SCU_UNLIKELY(!send(Code::CLOSE_STREAM, std::move(response), stream_num,
-        _sequence_number))) {
+      if (SCU_UNLIKELY(send(Code::CLOSE_STREAM, std::move(response), stream_num,
+        _sequence_number, false) == SendOutcome::CLOSED)) {
         panic("Failed to send CLOSE_STREAM ALREADY_CLOSED response for non-existing stream");
       }
       if (SCU_UNLIKELY(pos >= data.data.size())) {
@@ -1443,10 +1486,11 @@ void ScorpioUdpConnection::process_packets(
 }
 
 void ScorpioUdpConnection::send_heartbeat() {
+  const auto no_packet_timeout = _parent->no_packet_timeout();
   const auto time_since_last_packet = _time_provider->get_time() -
     _last_received_packet_time.load(std::memory_order_relaxed);
-  if (SCU_UNLIKELY(time_since_last_packet > SCU_UDP_TIMEOUT)) {
-    panic("No packets received for 5 seconds");
+  if (SCU_UNLIKELY(time_since_last_packet > no_packet_timeout)) {
+    panic(fmt::format("No packets received for {} ms", no_packet_timeout / 1'000'000));
   }
   for (size_t l2 = 0; l2 < _streams_mask_level_2.size(); ++l2) {
     if (!_streams_mask_level_2[l2]) {
@@ -1525,10 +1569,25 @@ void ScorpioUdpConnection::send_heartbeat() {
       }
     }
   }
-  send_or_panic(Code::HEARTBEAT, heartbeat_data);
-  _send_heartbeat_count.fetch_add(1, std::memory_order_relaxed);
-  if (full) {
-    _send_partial_heartbeat_count.fetch_add(1, std::memory_order_relaxed);
+  switch (send(Code::HEARTBEAT, heartbeat_data, std::nullopt, std::nullopt, false)) {
+    case SendOutcome::SENT:
+      _send_heartbeat_count.fetch_add(1, std::memory_order_relaxed);
+      if (full) {
+        _send_partial_heartbeat_count.fetch_add(1, std::memory_order_relaxed);
+      }
+      break;
+    case SendOutcome::FULL: {
+        // Deliberate drop: the next heartbeat tick is one period away, while blocking
+        // here would wedge the processing thread (it also drains incoming packets)
+        // and turn TX backpressure into a false no-packet timeout.
+        const auto skipped = _heartbeat_skip_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (skipped == 1 || skipped % 128 == 0) {
+          SCU_LOG_WARNING(_logger, "Sender queue full - skipped heartbeat to {}:{} ({} skipped so far)",
+            _remote_ip.str(), _remote_port, skipped);
+        }
+      } break;
+    case SendOutcome::CLOSED:
+      panic("Failed to send message in send");
   }
 }
 
@@ -1706,40 +1765,56 @@ auto ScorpioUdpConnection::generate_packets(
         stream_epoch);
 }
 
-bool ScorpioUdpConnection::send(
+SendOutcome ScorpioUdpConnection::send(
   Code code, const std::vector<uint8_t>& data, std::optional<StreamNumber> stream_number,
-  std::optional<std::reference_wrapper<std::atomic<size_t>>> sequence_number) {
+  std::optional<std::reference_wrapper<std::atomic<size_t>>> sequence_number, bool block) {
   if (SCU_UNLIKELY(!_parent->is_running())) {
-    return false;
+    return SendOutcome::CLOSED;
   }
-  if (SCU_UNLIKELY(!_parent->send(stream_number,
+  const auto outcome = _parent->send(stream_number,
     sequence_number.value_or(std::ref(_sequence_number)).get(),
-    code, _remote_ip, _remote_port, data))) {
-    SCU_LOG_ERROR(_logger, "Failed to send packet to {}:{}", _remote_ip.str(), _remote_port);
-    return false;
+    code, _remote_ip, _remote_port, data, block);
+  if (SCU_UNLIKELY(outcome != SendOutcome::SENT)) {
+    if (outcome == SendOutcome::CLOSED) {
+      SCU_LOG_ERROR(_logger, "Failed to send packet to {}:{}", _remote_ip.str(), _remote_port);
+    }
+    return outcome;
   }
   _send_bytes.fetch_add(data.size(), std::memory_order_relaxed);
-  return true;
+  return SendOutcome::SENT;
 }
 
-bool ScorpioUdpConnection::send(std::vector<uint8_t>&& packet) {
+SendOutcome ScorpioUdpConnection::send(std::vector<uint8_t>&& packet, bool block) {
   if (SCU_UNLIKELY(!_parent->is_running())) {
     SCU_LOG_ERROR(_logger, "Failed to send packet because parent socket is not running");
-    return false;
+    return SendOutcome::CLOSED;
   }
   const auto packet_size = packet.size();
-  if (SCU_UNLIKELY(!_parent->send(_remote_ip, _remote_port, std::move(packet)))) {
-    SCU_LOG_ERROR(_logger, "Failed to send packet to {}:{}", _remote_ip.str(), _remote_port);
-    return false;
+  const auto outcome = _parent->send_impl(_remote_ip, _remote_port, std::move(packet), block);
+  if (SCU_UNLIKELY(outcome != SendOutcome::SENT)) {
+    if (outcome == SendOutcome::CLOSED) {
+      SCU_LOG_ERROR(_logger, "Failed to send packet to {}:{}", _remote_ip.str(), _remote_port);
+    }
+    return outcome;
   }
   _send_bytes.fetch_add(packet_size, std::memory_order_relaxed);
-  return true;
+  return SendOutcome::SENT;
 }
 
 void ScorpioUdpConnection::send_or_panic(
   Code code, const std::vector<uint8_t>& data, std::string&& message) {
-  if (SCU_UNLIKELY(!send(code, data))) {
-    panic(std::move(message));
+  switch (send(code, data, std::nullopt, std::nullopt, false)) {
+    case SendOutcome::SENT:
+      break;
+    case SendOutcome::FULL:
+      // Deliberate drop: every caller is a control message retried on the next
+      // heartbeat, and blocking here would wedge the connection processing
+      // thread, turning TX backpressure into a false no-packet timeout.
+      SCU_LOG_WARNING(_logger, "Sender queue full - dropped control packet to {}:{}",
+        _remote_ip.str(), _remote_port);
+      break;
+    case SendOutcome::CLOSED:
+      panic(std::move(message));
   }
 }
 
@@ -1915,7 +1990,7 @@ bool ScorpioUdpStream::close() {
   return false;
 }
 
-SCU_HOT bool ScorpioUdpStream::send(Code code, const std::vector<uint8_t>& data) {
+SCU_HOT bool ScorpioUdpStream::send(Code code, const std::vector<uint8_t>& data, bool block) {
   if (SCU_UNLIKELY(!is_active() && !(state() == State::CLOSING && code == Code::CLOSE_STREAM))) {
     SCU_LOG_ERROR(_logger, "Attempted to send on inactive stream state: {}", magic_enum::enum_name(state()));
     return false;
@@ -1961,7 +2036,7 @@ SCU_HOT bool ScorpioUdpStream::send(Code code, const std::vector<uint8_t>& data)
     }
     SCU_LOG_TRACE(_logger, "Sending packet on stream {}: seq {} (packets left: {})", _stream_number, seq,
       parse_header(packet).ok_value().frames_left.value_or(32767));
-    if (SCU_UNLIKELY(!_parent->send(std::move(packet)))) {
+    if (SCU_UNLIKELY(_parent->send(std::move(packet), block) != SendOutcome::SENT)) {
       return false;
     }
     ++seq;
@@ -2028,7 +2103,7 @@ bool ScorpioUdpStream::closed() {
   return false;
 }
 
-bool ScorpioUdpStream::send_close_packet() {
+bool ScorpioUdpStream::send_close_packet(bool block) {
   std::vector<uint8_t> packet;
   packet.resize(sizeof(Code::CloseStreamSubCommands) + sizeof(ConnectionId) + sizeof(StreamNumber) +
     sizeof(StreamEpoch));
@@ -2040,7 +2115,7 @@ bool ScorpioUdpStream::send_close_packet() {
                                        offset), "Failed to convert stream number to network format");
   SCU_DO_AND_ASSERT(host_to_network<StreamEpoch>(_stream_epoch, packet,
                                        offset), "Failed to convert stream epoch to network format");
-  return send(Code::CLOSE_STREAM, packet);
+  return send(Code::CLOSE_STREAM, packet, block);
 }
 
 void ScorpioUdpStream::update() {
@@ -2057,7 +2132,7 @@ void ScorpioUdpStream::update() {
     case State::CREATED: {
         if (_stream_qos.is_reliable()) {
           if (sat_sub(_parent->_time_provider->get_time(), _last_heartbeat_time.load(std::memory_order_relaxed)) >
-            SCU_UDP_TIMEOUT) {
+            _parent->_parent->no_packet_timeout()) {
             SCU_LOG_ERROR(_logger, "Stream {} heartbeat timeout", _stream_number);
             _state.store(State::ERROR, std::memory_order_relaxed);
           }
@@ -2067,7 +2142,7 @@ void ScorpioUdpStream::update() {
       } break;
     case State::CLOSING: {
         if (sat_sub(_parent->_time_provider->get_time(), _closing_since.load(std::memory_order_relaxed)) >
-          SCU_UDP_TIMEOUT) {
+          _parent->_parent->no_packet_timeout()) {
           // The peer never answered the close. Fail the stream instead of retrying
           // forever - a live stream object pins its stream number, which would make
           // that number unusable for any future stream.
@@ -2075,7 +2150,9 @@ void ScorpioUdpStream::update() {
           _state.store(State::ERROR, std::memory_order_relaxed);
           break;
         }
-        send_close_packet();
+        // Non-blocking: retried on every heartbeat tick until CLOSED or the
+        // timeout above; blocking would wedge the connection processing thread.
+        send_close_packet(false);
       } break;
     default: break;
   }
@@ -2357,7 +2434,12 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
   // tracking below it is stale for at least this pass.
   const auto ack_cursor = cursor;
   enum class ResendResult : uint8_t { SENT, SKIPPED, OUT_OF_HISTORY, FAILED };
-  auto try_resend = [this, sequence_number, now](size_t i) -> ResendResult {
+  // Set once the sender queue reports full for this pass: further resends are
+  // pointless fuel on a saturated link, but the range walk must continue so 'pos'
+  // stays consistent for the next stream block and the stuck-resend bookkeeping
+  // still runs.
+  bool tx_full = false;
+  auto try_resend = [this, sequence_number, now, &tx_full](size_t i) -> ResendResult {
       // Packet i is gone from history only once it has been pushed out of the ring buffer,
       // i.e. more than _sent_history.size() newer packets have been sent. Written as an
       // addition (not sat_sub) so it is correct at the boundary and while the buffer is not
@@ -2380,14 +2462,26 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
         // heartbeat would turn one loss into a retransmission storm.
         return ResendResult::SKIPPED;
       }
-      SCU_LOG_TRACE(_logger, "Resending packet with sequence number {} on stream {}", i, _stream_number);
-      packet->last_send_time = now;
-      _parent->_retransmission_count.fetch_add(1, std::memory_order_relaxed);
-      if (SCU_UNLIKELY(!_parent->send(clone(packet->data)))) {
-        panic("Failed to resend packet (maybe connection or socket is closed?)");
-        return ResendResult::FAILED;
+      if (SCU_UNLIKELY(tx_full)) {
+        return ResendResult::SKIPPED;
       }
-      return ResendResult::SENT;
+      SCU_LOG_TRACE(_logger, "Resending packet with sequence number {} on stream {}", i, _stream_number);
+      switch (_parent->send(clone(packet->data), false)) {
+        case SendOutcome::SENT:
+          packet->last_send_time = now;
+          _parent->_retransmission_count.fetch_add(1, std::memory_order_relaxed);
+          return ResendResult::SENT;
+        case SendOutcome::FULL:
+          // Deliberate drop: the peer's next heartbeat repeats the NACKs. Blocking
+          // here (while holding _sent_history_mutex) is what used to wedge the
+          // connection processing thread into a false no-packet timeout.
+          tx_full = true;
+          return ResendResult::SKIPPED;
+        case SendOutcome::CLOSED:
+          panic("Failed to resend packet (maybe connection or socket is closed?)");
+          return ResendResult::FAILED;
+      }
+      SCU_UNREACHABLE();
     };
   // Records a seq the peer is still requesting that has fallen out of history, keeping
   // its original first-seen time if already tracked (so a persistently-stuck seq is not
@@ -2479,11 +2573,12 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
       it = _stuck_resend_since.erase(it);
       continue;
     }
-    if (now - it->second >= SCU_UDP_TIMEOUT) {
+    const auto stuck_resend_timeout = _parent->_parent->no_packet_timeout();
+    if (now - it->second >= stuck_resend_timeout) {
       SCU_LOG_WARNING(_logger,
                       "Peer has been requesting resend of sequence number {} on stream {} that is out of "
                       "resend history for over {}s - panicking stream to force recovery",
-        it->first, _stream_number, SCU_UDP_TIMEOUT / 1'000'000'000);
+        it->first, _stream_number, stuck_resend_timeout / 1'000'000'000);
       panic("Peer stuck requesting a packet that is no longer in resend history");
       return;
     }

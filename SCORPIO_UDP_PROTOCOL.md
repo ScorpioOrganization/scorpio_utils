@@ -438,7 +438,7 @@ The sender reads each stream block in turn and resends every sequence number in 
 
 ### Stuck-resend self-heal
 
-If a requested sequence number has already fallen out of `_sent_history` (evicted by the ring buffer), the sender cannot honor the resend and just logs a warning - this can otherwise loop forever on a reliable-ordered stream. If the peer keeps requesting the **same** out-of-history sequence number continuously for `SCU_UDP_TIMEOUT`, the sender panics its own stream (forcing the peer to eventually rebuild it via a fresh CREATE_STREAM) instead of getting stuck retrying indefinitely.
+If a requested sequence number has already fallen out of `_sent_history` (evicted by the ring buffer), the sender cannot honor the resend and just logs a warning - this can otherwise loop forever on a reliable-ordered stream. If the peer keeps requesting the **same** out-of-history sequence number continuously for the no-packet timeout (default `SCU_UDP_TIMEOUT`), the sender panics its own stream (forcing the peer to eventually rebuild it via a fresh CREATE_STREAM) instead of getting stuck retrying indefinitely.
 
 ### Sequence number wrapping
 
@@ -460,20 +460,22 @@ On the receive side:
 ## Keepalive and Timeout
 
 - A HEARTBEAT is sent every **50ms** from each connection's processing thread.
-- If no packet (of any kind) is received for **5 seconds** (`SCU_UDP_TIMEOUT`), the connection panics and closes. Only packets that passed **connection id validation** count as proof of life; traffic from a mismatched (stale) incarnation is dropped without refreshing the clock.
-- Each **reliable** stream additionally tracks its own last-heartbeat-ACK time independently of the connection: if `SCU_UDP_TIMEOUT` elapses without a heartbeat response covering that stream, only that stream panics (`State::ERROR`) - the connection and its other streams are unaffected.
-- A stream stuck in **CLOSING** for `SCU_UDP_TIMEOUT` (the peer never answers the close) panics instead of retrying forever - a live CLOSING stream pins its stream number, which would otherwise stay unusable.
+- If no packet (of any kind) is received for the **no-packet timeout** (default **5 seconds**, `SCU_UDP_TIMEOUT`; overridable at build time via `#ifndef` and at runtime via `ScorpioUdp::set_no_packet_timeout`), the connection panics and closes. Only packets that passed **connection id validation** count as proof of life; traffic from a mismatched (stale) incarnation is dropped without refreshing the clock.
+- The liveness clock is refreshed in two places: by the packet handlers on the connection's processing thread, and - for HEARTBEATs only - **at routing time** on the socket processing thread, after validating the connection id carried in the heartbeat. The routing-time refresh means a connection whose processing thread is behind on its incoming-packet queue cannot false-panic while valid heartbeats are still arriving.
+- Each **reliable** stream additionally tracks its own last-heartbeat-ACK time independently of the connection: if the no-packet timeout elapses without a heartbeat response covering that stream, only that stream panics (`State::ERROR`) - the connection and its other streams are unaffected.
+- A stream stuck in **CLOSING** for the no-packet timeout (the peer never answers the close) panics instead of retrying forever - a live CLOSING stream pins its stream number, which would otherwise stay unusable.
 - When a **connection** dies (panic, rejection, or any abnormal processing-thread exit), the failure **cascades to every stream** on it, including streams still queued for creation. No stream may outlive its connection in a usable-looking state.
 - The HEARTBEAT serves double duty: keepalive signal and reliable-stream ACK/NACK carrier.
 - HEARTBEATs and all other control packets (CONNECT/DISCONNECT/CREATE_STREAM/CLOSE_STREAM/ERROR) travel through a **priority send queue** drained before bulk STREAM_DATA, so a saturated data path cannot starve keepalives into false timeouts.
+- Control-plane sends issued from protocol threads (heartbeats, handshake replies, retransmissions, CREATE/CLOSE retries) are **non-blocking, drop-on-full**: when even the priority queue is full the packet is dropped and its natural retry cycle (the next heartbeat tick or the peer's retry) recovers it. Blocking would wedge the issuing protocol thread - which also drains incoming packets - turning TX backpressure into a false no-packet timeout. Only the application-facing `ScorpioUdpStream::send` (bulk STREAM_DATA) blocks; that is the intended backpressure point. Dropped heartbeats are counted per connection (`heartbeat_skip_count`).
 
 ## Protocol Constants
 
 | Constant | Value | Meaning |
 |----------|-------|---------|
 | `SCU_UDP_MAX_PACKET_SIZE` | 512 bytes | Maximum UDP payload |
-| `SCU_UDP_HEARTBEAT_PERIOD` | 50 ms | Heartbeat interval |
-| `SCU_UDP_TIMEOUT` | 5 s | No-packet timeout before disconnect; also the CLOSING and stuck-resend give-up timeout |
+| `SCU_UDP_HEARTBEAT_PERIOD` | 50 ms | Heartbeat interval (overridable at build time via `#ifndef`) |
+| `SCU_UDP_TIMEOUT` | 5 s | **Default** no-packet timeout before disconnect; also the CLOSING and stuck-resend give-up timeout. Overridable at build time (`#ifndef`) and at runtime (`ScorpioUdp::set_no_packet_timeout`) |
 | `SCU_UDP_CREATE_RETRY_PERIOD` | 5 s | Stream creation give-up timeout (CREATE retried every heartbeat until this elapses) |
 | `SCU_UDP_UNRELIABLE_DATA_EXPIRY_NS` | 500 ms | Expiry for incomplete unreliable fragments |
 | `SCU_UDP_QOS_DEPTH_SAFETY_BUFFER` | 4096 | Extra history slots beyond QoS depth |

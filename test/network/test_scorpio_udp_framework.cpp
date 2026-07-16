@@ -2186,6 +2186,28 @@ void close_connection(std::vector<EventQueueItem>& events, const std::shared_ptr
   events.push_back({ WHERE, 0, connection_handle->expect_disconnect(Code::DisconnectSubCommands::ACCEPTED) });
 }
 
+// Applies ScorpioUdp::set_no_packet_timeout to the socket under test.
+class SetNoPacketTimeout final : public EventInTime {
+  const int64_t _timeout_ns;
+
+public:
+  explicit SetNoPacketTimeout(int64_t timeout_ns)
+  : _timeout_ns(timeout_ns) { }
+
+  Expected<Success, std::string> execute(
+    int64_t,
+    UdpSocket&,
+    std::shared_ptr<ScorpioUdp> scorpio_udp
+  ) override {
+    scorpio_udp->set_no_packet_timeout(_timeout_ns);
+    return Success();
+  }
+  std::string name() override {
+    return "SetNoPacketTimeout(" + std::to_string(_timeout_ns) + "ns)";
+  }
+  ~SetNoPacketTimeout() override = default;
+};
+
 TEST_F(ScorpioUdpTester, auto_accept_default_and_toggle) {
   std::vector<EventQueueItem> events;
   events.push_back({ WHERE, 0, std::make_unique<StartScorpioUdp>() });
@@ -2386,6 +2408,24 @@ TEST_F(ScorpioUdpTester, connection_panics_on_peer_silence) {
   events.push_back({ WHERE, 0, connection_handle->expect_counters(
     std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
     std::nullopt, std::nullopt, /*panic_count=*/ SCU_AS(uint64_t, 1), /*has_last_panic_time=*/ true) });
+  // Explicit close — see comment in connect_rejected_by_peer.
+  events.push_back({ WHERE, 0, connection_handle->close_connection(true) });
+  execute_test(events);
+}
+
+TEST_F(ScorpioUdpTester, configurable_timeout_extends_gap_tolerance) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  events.push_back({ WHERE, 0, std::make_unique<SetNoPacketTimeout>(3 * SCU_UDP_TIMEOUT) });
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  // Silence longer than the default 5 s timeout: with the raised runtime timeout
+  // the connection must ride it out...
+  events.push_back({ WHERE, 0, std::make_unique<AdvanceTimeEvent>(SCU_UDP_TIMEOUT + TICK_TIME * 4) });
+  events.push_back({ WHERE, 0, connection_handle->connection_is_panic(false) });
+  events.push_back({ WHERE, 0, connection_handle->connection_is_alive(true) });
+  // ...and still panic once the configured timeout actually elapses.
+  events.push_back({ WHERE, 0, std::make_unique<AdvanceTimeEvent>(2 * SCU_UDP_TIMEOUT + TICK_TIME * 4) });
+  events.push_back({ WHERE, 0, connection_handle->connection_is_panic(true) });
   // Explicit close — see comment in connect_rejected_by_peer.
   events.push_back({ WHERE, 0, connection_handle->close_connection(true) });
   execute_test(events);

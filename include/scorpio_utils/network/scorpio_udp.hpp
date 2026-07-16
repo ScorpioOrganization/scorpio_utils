@@ -44,8 +44,14 @@
 #define SCU_UDP_QOS_DEPTH_SAFETY_BUFFER (4096)
 #endif
 #define SCU_UDP_UNRELIABLE_DATA_EXPIRY_NS (500'000'000)  // 500 milliseconds
+#ifndef SCU_UDP_HEARTBEAT_PERIOD
 #define SCU_UDP_HEARTBEAT_PERIOD (50'000'000)
+#endif
+// Default no-packet timeout; overridable at build time here and at runtime via
+// ScorpioUdp::set_no_packet_timeout.
+#ifndef SCU_UDP_TIMEOUT
 #define SCU_UDP_TIMEOUT (5'000'000'000)
+#endif
 #define SCU_UDP_CREATE_RETRY_PERIOD (5'000'000'000)
 // Minimum time between retransmissions of the same packet. Without it a packet in
 // flight longer than one heartbeat period would be resent on every heartbeat,
@@ -86,6 +92,17 @@ using TimeProvider = scorpio_utils::testing::MockTimeProvider;
 #else
 using TimeProvider = time_provider::LazyTimeProvider;
 #endif
+
+// Result of handing a packet to the socket's sender queues. FULL is only possible
+// for non-blocking sends and means the packet was dropped because the queue was
+// full; every non-blocking caller relies on a natural retry cycle (heartbeat tick,
+// peer retry) instead of blocking - a blocked protocol thread cannot process
+// incoming packets and would turn TX backpressure into a false no-packet timeout.
+enum class SendOutcome : uint8_t {
+  SENT,
+  FULL,
+  CLOSED,
+};
 
 struct MessageHeader {
   size_t data_offset;
@@ -311,12 +328,12 @@ private:
   size_t get_packet_number(SeqNumber seq) noexcept;
 
   void send_create_packet();
-  bool send_close_packet();
+  bool send_close_packet(bool block = true);
   ScorpioUdpStream(
     StreamNumber stream_number, StreamEpoch stream_epoch, StreamQoS stream_qos,
     bool created_by_peer, std::shared_ptr<ScorpioUdpConnection> parent);
 
-  bool send(Code code, const std::vector<uint8_t>& data);
+  bool send(Code code, const std::vector<uint8_t>& data, bool block = true);
   void panic(std::string&& message);
 
   void connected();
@@ -438,6 +455,9 @@ private:
   std::atomic<uint64_t> _received_heartbeat_count;
   std::atomic<uint64_t> _send_heartbeat_count;
   std::atomic<uint64_t> _send_partial_heartbeat_count;
+  // Heartbeats deliberately dropped because the sender queue was full (see
+  // send_heartbeat) - a sustained non-zero rate means the TX path is saturated.
+  std::atomic<uint64_t> _heartbeat_skip_count{ 0 };
   std::mutex _panic_mutex;
   threading::Signal _start_signal;
   std::shared_ptr<logger::Logger> _logger;
@@ -471,6 +491,12 @@ private:
   std::array<std::atomic<StreamEpoch>, max_streams_count> _streams_epoch;
   std::thread _processing_thread;
   bool connected();
+  // Refreshes the no-packet liveness clock. Called by the socket processing thread
+  // at routing time for id-validated heartbeats (see ScorpioUdp::process_packet) in
+  // addition to the packet handlers on the connection's own processing thread.
+  SCU_ALWAYS_INLINE void note_liveness() noexcept {
+    _last_received_packet_time.store(_time_provider->get_time(), std::memory_order_relaxed);
+  }
   std::shared_ptr<ScorpioUdpStream> get_stream(StreamNumber);
   void handle_new_packet(const MessageHeader& header, UdpData&& data);
   void pull_awaiting_streams(std::shared_ptr<scorpio_utils::network::ScorpioUdpStream> stream);
@@ -492,10 +518,14 @@ private:
     Code code, const std::vector<uint8_t>& data, std::optional<StreamNumber> stream_number = std::nullopt,
     std::optional<std::reference_wrapper<std::atomic<size_t>>> sequence_number = std::nullopt,
     std::optional<StreamEpoch> stream_epoch = std::nullopt);
-  bool send(
+  SendOutcome send(
     Code code, const std::vector<uint8_t>& data, std::optional<StreamNumber> stream_number = std::nullopt,
-    std::optional<std::reference_wrapper<std::atomic<size_t>>> sequence_number = std::nullopt);
-  bool send(std::vector<uint8_t>&& packet);
+    std::optional<std::reference_wrapper<std::atomic<size_t>>> sequence_number = std::nullopt,
+    bool block = true);
+  SendOutcome send(std::vector<uint8_t>&& packet, bool block = true);
+  // Non-blocking: on a full sender queue the packet is dropped (every caller is a
+  // control-plane message retried on the next heartbeat); panics only when the
+  // socket/channel is closed.
   void send_or_panic(
     Code code, const std::vector<uint8_t>& data,
     std::string&& message = "Failed to send message in send");
@@ -581,6 +611,9 @@ public:
   SCU_ALWAYS_INLINE auto send_partial_heartbeat_count() const noexcept {
     return _send_partial_heartbeat_count.load(std::memory_order_relaxed);
   }
+  SCU_ALWAYS_INLINE auto heartbeat_skip_count() const noexcept {
+    return _heartbeat_skip_count.load(std::memory_order_relaxed);
+  }
   SCU_ALWAYS_INLINE auto send_heartbeat_count() const noexcept {
     return _send_heartbeat_count.load(std::memory_order_relaxed);
   }
@@ -632,6 +665,9 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   std::atomic<uint64_t> _received_bytes;
   std::atomic<uint64_t> _send_bytes;
   std::atomic<bool> _auto_accept;
+  // Runtime no-packet timeout; governs the connection no-packet panic, the per-stream
+  // heartbeat/CLOSING timeouts and the stuck-resend give-up. Defaults to SCU_UDP_TIMEOUT.
+  std::atomic<int64_t> _no_packet_timeout_ns{ SCU_UDP_TIMEOUT };
   std::atomic<bool> _stop;
   threading::Signal _start_signal;
   std::shared_ptr<logger::Logger> _logger;
@@ -660,18 +696,29 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   threading::Channel<std::weak_ptr<ScorpioUdpConnection>> _awaiting_connections_channel;
   std::vector<std::thread> _threads;
   void panic(std::string&& message);
-  bool send(
+  SendOutcome send(
     std::optional<StreamNumber> stream_number,
     std::atomic<size_t>& sequence_number,
     Code code,
     Ipv4 remote_ip,
     Port remote_port,
-    const std::vector<uint8_t>& data);
+    const std::vector<uint8_t>& data,
+    bool block = true);
   bool send(
     Ipv4 remote_ip,
     Port remote_port,
     std::vector<uint8_t>&& packet
   );
+  SendOutcome send_impl(
+    Ipv4 remote_ip,
+    Port remote_port,
+    std::vector<uint8_t>&& packet,
+    bool block
+  );
+  // Non-blocking: on a full sender queue the packet is dropped (all callers are
+  // socket-thread replies the peer retries); panics only when the socket/channel
+  // is closed. Blocking here would wedge the socket processing thread, stalling
+  // packet routing for every connection.
   void send_or_panic(
     std::optional<StreamNumber> stream_number,
     std::atomic<size_t>& sequence_number,
@@ -769,6 +816,14 @@ public:
 
   SCU_ALWAYS_INLINE auto set_auto_accept(bool auto_accept) noexcept {
     return _auto_accept.exchange(auto_accept, std::memory_order_relaxed);
+  }
+
+  SCU_ALWAYS_INLINE void set_no_packet_timeout(int64_t timeout_ns) noexcept {
+    _no_packet_timeout_ns.store(timeout_ns, std::memory_order_relaxed);
+  }
+
+  SCU_ALWAYS_INLINE auto no_packet_timeout() const noexcept {
+    return _no_packet_timeout_ns.load(std::memory_order_relaxed);
   }
 
   template<bool Wait = false>
