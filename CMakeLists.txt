@@ -25,11 +25,14 @@ endif()
 
 add_compile_options(-std=c++17 -Wall -Wextra -Wpedantic -pedantic-errors -Wdeprecated
   -Wc++17-compat -Wconversion -Wsign-conversion -Wpessimizing-move -Werror
-  -g -fno-omit-frame-pointer
-  -flto=auto
+  -O2 -g -fno-omit-frame-pointer
+  # -flto=auto
 )
 
-add_link_options(-flto=auto)
+add_link_options(
+  -O2 -g -fno-omit-frame-pointer
+  -flto=auto
+)
 
 include_directories(
   include/

@@ -262,7 +262,6 @@ public:
 
 private:
   friend class ScorpioUdpConnection;
-  threading::Channel<std::vector<uint8_t>, 1024 * 1024> _receive;
   const StreamNumber _stream_number;
   const StreamEpoch _stream_epoch;
   const StreamQoS _stream_qos;
@@ -324,6 +323,7 @@ private:
   std::atomic<int64_t> _last_panic_time;
   std::string _panic_message;
   std::mutex _panic_mutex;
+  threading::Channel<std::vector<uint8_t>, 8192> _receive;
 
   size_t get_packet_number(SeqNumber seq) noexcept;
 

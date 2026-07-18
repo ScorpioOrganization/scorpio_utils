@@ -834,7 +834,9 @@ SCU_HOT std::optional<std::pair<size_t, std::vector<std::vector<uint8_t>>>> gene
     SCU_DO_AND_ASSERT(host_to_network(*stream_epoch, packets.back(), packet_pos),
             "Failed to convert stream epoch to network format");
   }
-  std::memcpy(packets.back().data() + packet_pos, data.data() + current, data.size() - current);
+  if (data.data() != nullptr) {
+    std::memcpy(packets.back().data() + packet_pos, data.data() + current, data.size() - current);
+  }
   return { { first_packet_seq, packets } };
 }
 
