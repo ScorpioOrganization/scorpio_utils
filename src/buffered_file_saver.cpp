@@ -18,12 +18,16 @@
 
 #include "scorpio_utils/buffered_file_saver.hpp"
 
+#include "scorpio_utils/defer.hpp"
 #include "scorpio_utils/misc.hpp"
 
 bool scorpio_utils::BufferedFileSaver::flush() {
   if (_operations.empty()) {
     return true;
   }
+  SCU_DEFER(([this] {
+      _operations.clear();
+    }));
   if (!_preopened) {
     _file.open(_filename, std::ios_base::out | _file_openmode);
   }
@@ -55,6 +59,5 @@ bool scorpio_utils::BufferedFileSaver::flush() {
       return false;
     }
   }
-  _operations.clear();
   return true;
 }
