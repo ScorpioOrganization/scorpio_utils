@@ -2,3 +2,4 @@
 .cache
 .zed
 .claude
+__pycache__

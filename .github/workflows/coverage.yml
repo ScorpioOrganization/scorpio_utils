@@ -1,0 +1,350 @@
+name: Coverage
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ROS_DISTRO: humble
+  COVERVIEW_REF: e10ed981fdc0681cd78b95a42d8b45cdf1bf34a1
+  DEPLOY: ${{ github.ref == 'refs/heads/master' && github.event_name != 'pull_request' }}
+
+jobs:
+  build_and_test:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'coverage'))
+    runs-on: ubuntu-22.04
+    container: ros:humble-perception
+    strategy:
+      matrix:
+        ROS_DISTRO: [humble]
+    env:
+      ROS_DISTRO: ${{ matrix.ROS_DISTRO }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_VERSION: 4.10.2
+      CCACHE_SHA256: 80cab87bd510eca796467aee8e663c398239e0df1c4800a0b5dff11dca0b4f18
+      # The cache key is unique per commit, so every run uploads a fresh entry. Unbounded, the
+      # coverage caches evict each other and CI-Core's out of the 10 GB per-repo quota.
+      CCACHE_MAXSIZE: 2G
+      # Default is `mtime`. `ros:humble-perception` is a moving tag, so every image refresh
+      # changes gcc's mtime and throws away the whole cache for no reason.
+      CCACHE_COMPILERCHECK: content
+    steps:
+      - name: Add env variable ROS_RUNTIME_DIRECTORY
+        run: |
+          echo ROS_RUNTIME_DIRECTORY="$HOME/ros_runtime_dir" >> "$GITHUB_ENV"
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          path: src/scorpio_utils
+          submodules: recursive
+
+      - name: Setup ROS2 workspace
+        run: |
+          # Create workspace directory structure
+          mkdir -p /workspace/src
+          # Move checked out code to proper workspace location
+          mv src/scorpio_utils /workspace/src/
+
+      - name: Set timezone and install additional dependencies
+        run: |
+          apt-get update
+          apt-get install -y \
+            curl \
+            libpcl-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            tzdata \
+            xz-utils \
+            python3-pip \
+            python3-venv
+          ln -snf /usr/share/zoneinfo/Europe/Warsaw /etc/localtime
+          echo 'Europe/Warsaw' > /etc/timezone
+
+      - name: Install ccache
+        shell: bash
+        run: |
+          # Deliberately not the apt package: jammy ships ccache 4.5.1, whose profiling-option
+          # parser does not know `-fprofile-update=atomic` and fails closed on it
+          # (`Result: unsupported_compiler_option`), so every translation unit bypasses the cache
+          # and the hit rate is a flat 0%. 4.9.1 has the same problem; 4.10 is the first release
+          # that accepts the option. Dropping the flag instead is not an option - this library is
+          # heavily threaded and non-atomic gcov counters lose increments under concurrency.
+          curl -fsSL -o /tmp/ccache.tar.xz \
+            "https://github.com/ccache/ccache/releases/download/v${CCACHE_VERSION}/ccache-${CCACHE_VERSION}-linux-x86_64.tar.xz"
+          echo "${CCACHE_SHA256}  /tmp/ccache.tar.xz" | sha256sum -c -
+          tar -xf /tmp/ccache.tar.xz -C /tmp
+          install -m755 "/tmp/ccache-${CCACHE_VERSION}-linux-x86_64/ccache" /usr/local/bin/ccache
+          ccache --version
+
+      - name: Install coverage dependencies
+        shell: bash
+        working-directory: /workspace
+        run: |
+          python3 -m venv /workspace/.venv
+          source /workspace/.venv/bin/activate
+          pip3 install fastcov
+          pip3 install git+https://github.com/antmicro/info-process.git
+
+      - name: Calculate files hash
+        id: calculate_hash
+        shell: bash
+        working-directory: /workspace/src/scorpio_utils
+        run: |
+          echo C_FILES_HASH="$(find . -type f \
+            \( -name \*.hpp -o -name \*.cpp -o -name \*.cc -o -name \*.c -o -name \*.h  -o -name \*.cxx -o -name \*.hh -o -name \*.hxx \) \
+            -exec sha256sum {} + | sort | sha256sum | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+
+      - name: Update rosdep
+        shell: bash
+        working-directory: /workspace
+        run: |
+          source /opt/ros/${{ matrix.ROS_DISTRO }}/setup.bash
+          rosdep update
+
+      - name: Install dependencies with rosdep
+        shell: bash
+        working-directory: /workspace
+        run: |
+          source /opt/ros/${{ matrix.ROS_DISTRO }}/setup.bash
+          rosdep install --from-paths src --ignore-src -r -y
+
+      - name: Restore cache build artifacts - ccache
+        uses: actions/cache/restore@v4
+        id: restore-cache
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ runner.os }}-${{ runner.arch }}-ccache_coverage-${{ matrix.ROS_DISTRO }}-${{ github.ref }}-${{ steps.calculate_hash.outputs.C_FILES_HASH }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-ccache_coverage-${{ matrix.ROS_DISTRO }}-${{ github.ref }}-${{ steps.calculate_hash.outputs.C_FILES_HASH }}-${{ github.sha }}
+            ${{ runner.os }}-${{ runner.arch }}-ccache_coverage-${{ matrix.ROS_DISTRO }}-${{ github.ref }}-${{ steps.calculate_hash.outputs.C_FILES_HASH }}-
+            ${{ runner.os }}-${{ runner.arch }}-ccache_coverage-${{ matrix.ROS_DISTRO }}-${{ github.ref }}-
+            ${{ runner.os }}-${{ runner.arch }}-ccache_coverage-${{ matrix.ROS_DISTRO }}-refs/heads/master-
+            ${{ runner.os }}-${{ runner.arch }}-ccache_coverage-${{ matrix.ROS_DISTRO }}-
+
+      - name: Build workspace
+        shell: bash
+        working-directory: /workspace
+        run: |
+          source /opt/ros/${{ matrix.ROS_DISTRO }}/setup.bash
+          export CMAKE_CXX_COMPILER_LAUNCHER=ccache
+          export CMAKE_C_COMPILER_LAUNCHER=ccache
+
+          # Kept outside CCACHE_DIR so it is not swept into the saved cache. Zeroing has to
+          # happen after the restore step, since the counters live inside CCACHE_DIR.
+          export CCACHE_LOGFILE=/workspace/ccache.log
+          ccache --zero-stats
+
+          colcon build \
+            --symlink-install \
+            --cmake-args \
+              -DCMAKE_BUILD_TYPE=Debug \
+              -DCMAKE_CXX_FLAGS="--coverage -fprofile-update=atomic" \
+              -DCMAKE_CXX_OUTPUT_EXTENSION_REPLACE=ON \
+              -DCMAKE_VERBOSE_MAKEFILE=OFF \
+              -Wno-dev
+
+      - name: Show ccache stats
+        if: always()
+        shell: bash
+        run: |
+          ccache --show-stats --verbose
+
+          # A compiler option ccache cannot parse silently disables caching for every single
+          # translation unit, which is exactly how this job ran at a 0% hit rate while the
+          # actions/cache steps kept happily reporting restores and saves. Fail loudly instead.
+          # Checked against the log rather than the `Uncacheable calls` counter: CMake's
+          # try_compile probes go through the launcher and link, which is legitimately
+          # uncacheable, so a `!= 0` assertion on that counter would fail spuriously.
+          if grep -qs 'unsupported_compiler_option' /workspace/ccache.log; then
+            echo "::error::ccache rejected a compiler option - nothing was cached"
+            grep -m1 'Unknown .* option' /workspace/ccache.log
+            exit 1
+          fi
+
+      - name: Save cache build artifacts - ccache
+        uses: actions/cache/save@v4
+        # Without `(success() || failure()) && ` github implicitly adds `success() && `
+        if: (success() || failure()) && steps.restore-cache.outcome == 'success'
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ runner.os }}-${{ runner.arch }}-ccache_coverage-${{ matrix.ROS_DISTRO }}-${{ github.ref }}-${{ steps.calculate_hash.outputs.C_FILES_HASH }}-${{ github.sha }}
+
+      - name: Run tests
+        shell: bash
+        working-directory: /workspace
+        run: |
+          source /opt/ros/${{ matrix.ROS_DISTRO }}/setup.bash
+          source install/setup.bash
+          colcon test
+
+      - name: Show test results
+        working-directory: /workspace
+        run: |
+          colcon test-result --verbose
+
+      - name: Generate coverage report (fastcov)
+        shell: bash
+        working-directory: /workspace
+        run: |
+          source /workspace/.venv/bin/activate
+
+          mkdir -p /workspace/coverage_data
+
+          fastcov \
+            --search-directory build \
+            --process-gcno \
+            --branch-coverage \
+            --exclude /usr/include/ /usr/lib/ /opt/ros/ /workspace/build/ /workspace/install/ \
+            --jobs "$(nproc)" \
+            --lcov \
+            --output /workspace/coverage_data/coverage.info
+
+          sed -i 's|/workspace/src/scorpio_utils/||g' /workspace/coverage_data/coverage.info
+
+      - name: Filter coverage data (info-process)
+        shell: bash
+        working-directory: /workspace
+        run: |
+          source /workspace/.venv/bin/activate
+
+          # Filter out everything that is inside `test` directory
+          # or is a .cpp file with `test_` prefix
+          info-process transform \
+            --filter-out '(\/|^)test(\/|(_\w+\.cpp))' \
+            /workspace/coverage_data/coverage.info
+
+      - name: Verify tests excluded from coverage data
+        shell: bash
+        run: |
+          # Every step in this job runs with `if: always()`, so a failed filter step would
+          # otherwise go on to publish unfiltered data. Fail hard instead.
+          if grep -nE '^SF:([^:]*/)?test(/|_[A-Za-z0-9_]+\.cpp)' /workspace/coverage_data/coverage.info; then
+            echo "::error::test sources still present in coverage.info after filtering"
+            exit 1
+          fi
+
+      - name: Prepare coverview data
+        shell: bash
+        working-directory: /workspace
+        run: |
+          python3 /workspace/src/scorpio_utils/scripts/gen-coverview-data.py \
+            --info /workspace/coverage_data/coverage.info \
+            --repo-root /workspace/src/scorpio_utils \
+            --out-dir /workspace/coverage_data \
+            --repo "${{ github.repository }}" \
+            --branch "${{ github.ref_name }}" \
+            --commit "${{ github.sha }}"
+
+      - name: Verify tests excluded from coverview sources
+        shell: bash
+        run: |
+          if grep -nE '^### FILE: ([^ ]*/)?test/' /workspace/coverage_data/sources.txt; then
+            echo "::error::test sources still present in sources.txt"
+            exit 1
+          fi
+
+      - name: Fetch coverview source
+        shell: bash
+        run: |
+          git clone --quiet https://github.com/antmicro/coverview.git /tmp/coverview
+          git -C /tmp/coverview checkout --quiet "${{ env.COVERVIEW_REF }}"
+
+      # Restore-only. `embed.py` mutates `dist/` in place, so a plain `actions/cache@v4`
+      # would save the already-embedded site at the end of the job. The next run would then
+      # restore it, find no `let originalFiles = {}` placeholder left to replace, silently
+      # skip the injection and publish the previous run's data forever.
+      - name: Restore cached coverview build
+        id: cache-coverview-dist
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/coverview/dist
+          key: coverview-dist-v2-${{ env.COVERVIEW_REF }}
+
+      - name: Setup Node
+        if: steps.cache-coverview-dist.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+          apt-get install -y nodejs
+
+      - name: Build coverview
+        id: build-coverview
+        if: steps.cache-coverview-dist.outputs.cache-hit != 'true'
+        shell: bash
+        working-directory: /tmp/coverview
+        run: |
+          npm ci
+          npm run build
+
+      # Saved here, before the embed step, so the cache only ever holds a pristine build.
+      # Cache keys are immutable, so only save a build that actually succeeded.
+      - name: Save coverview build cache
+        if: steps.cache-coverview-dist.outputs.cache-hit != 'true' && steps.build-coverview.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/coverview/dist
+          key: coverview-dist-v2-${{ env.COVERVIEW_REF }}
+
+      - name: Embed coverage data
+        shell: bash
+        working-directory: /tmp/coverview
+        run: |
+          # `embed.py` injects by a plain string replace and silently does nothing when the
+          # placeholder is missing, which would publish a stale report. Fail instead.
+          if ! grep -q 'let originalFiles = {}' dist/index.html; then
+            echo "::error::dist/index.html has no embed placeholder - coverview dist is not pristine (stale cache?)"
+            exit 1
+          fi
+
+          python3 embed.py --inject-data /workspace/coverage_data
+
+          rm -rf dist/assets dist/index.html.bak
+
+      - name: Upload coverage data artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-data
+          path: /workspace/coverage_data
+          retention-days: 14
+
+      - name: Upload coverview site artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverview-site
+          path: /tmp/coverview/dist
+          retention-days: 14
+
+      - name: Upload coverage report as Pages artifact
+        if: ${{ env.DEPLOY == 'true' }}
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: /tmp/coverview/dist
+
+  deploy:
+    if: ${{ github.ref == 'refs/heads/master' && github.event_name != 'pull_request' }}
+    needs: build_and_test
+    runs-on: ubuntu-22.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

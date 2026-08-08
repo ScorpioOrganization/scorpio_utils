@@ -1,4 +1,4 @@
-name: CI-Core
+name: CI-scorpio_utils
 
 on:
   workflow_dispatch:
@@ -24,6 +24,11 @@ jobs:
       ROS_DISTRO: ${{ matrix.ROS_DISTRO }}
       TZ: 'Europe/Warsaw'
       CCACHE_DIR: ${{ github.workspace }}/.ccache
+      # Two matrix legs share the 10 GB per-repo cache quota with the Coverage workflow.
+      CCACHE_MAXSIZE: 1G
+      # Default is `mtime`, so every refresh of the `ros:*-perception` tag changes gcc's mtime
+      # and throws away the whole cache for no reason.
+      CCACHE_COMPILERCHECK: content
 
     steps:
       - name: Install ament linting tools
@@ -116,12 +121,22 @@ jobs:
           ln -snf /usr/share/zoneinfo/Europe/Warsaw /etc/localtime
           echo 'Europe/Warsaw' > /etc/timezone
 
+      - name: Calculate files hash
+        id: calculate_hash
+        shell: bash
+        working-directory: /workspace/src/scorpio_utils
+        run: |
+          echo C_FILES_HASH="$(find . -type f \
+            \( -name \*.hpp -o -name \*.cpp -o -name \*.cc -o -name \*.c -o -name \*.h  -o -name \*.cxx -o -name \*.hh -o -name \*.hxx \) \
+            -exec sha256sum {} + | sort | sha256sum | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+
       - name: Cache build artifacts - ccache
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ${{ runner.os }}-${{ runner.arch }}-ccache-${{ matrix.ROS_DISTRO }}-${{ github.ref }}-${{ steps.calculate_hash.outputs.C_FILES_HASH }}
+          key: ${{ runner.os }}-${{ runner.arch }}-ccache-${{ matrix.ROS_DISTRO }}-${{ github.ref }}-${{ steps.calculate_hash.outputs.C_FILES_HASH }}-${{ github.sha }}
           restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-ccache-${{ matrix.ROS_DISTRO }}-${{ github.ref }}-${{ steps.calculate_hash.outputs.C_FILES_HASH }}-
             ${{ runner.os }}-${{ runner.arch }}-ccache-${{ matrix.ROS_DISTRO }}-${{ github.ref }}-
             ${{ runner.os }}-${{ runner.arch }}-ccache-${{ matrix.ROS_DISTRO }}-refs/heads/master-
             ${{ runner.os }}-${{ runner.arch }}-ccache-${{ matrix.ROS_DISTRO }}-
