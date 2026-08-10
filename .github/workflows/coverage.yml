@@ -16,7 +16,7 @@ concurrency:
 
 env:
   ROS_DISTRO: humble
-  COVERVIEW_REF: e10ed981fdc0681cd78b95a42d8b45cdf1bf34a1
+  COVERVIEW_REF: 9d2148dd525d9ad3cce62c9363fea219a541e963
   DEPLOY: ${{ github.ref == 'refs/heads/master' && github.event_name != 'pull_request' }}
 
 jobs:
@@ -209,6 +209,8 @@ jobs:
             --process-gcno \
             --branch-coverage \
             --exclude /usr/include/ /usr/lib/ /opt/ros/ /workspace/build/ /workspace/install/ \
+            --custom-exclusion-marker LCOV_EXCL_LINE SCU_ASSERT SCU_DO_AND_ASSERT SCU_UNIMPLEMENTED \
+              SCU_UNLIKELY_UNCOV SCU_UNLIKELY_THROW_IF_UNCOV \
             --jobs "$(nproc)" \
             --lcov \
             --output /workspace/coverage_data/coverage.info
