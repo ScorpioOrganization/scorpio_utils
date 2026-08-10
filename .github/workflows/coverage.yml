@@ -19,6 +19,10 @@ env:
   COVERVIEW_REF: 9d2148dd525d9ad3cce62c9363fea219a541e963
   DEPLOY: ${{ github.ref == 'refs/heads/master' && github.event_name != 'pull_request' }}
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   build_and_test:
     if: >-
@@ -217,6 +221,8 @@ jobs:
 
           sed -i 's|/workspace/src/scorpio_utils/||g' /workspace/coverage_data/coverage.info
 
+      # Runs before the summary so the LF/LH/BRF/BRH totals reflect the filtered set.
+      # `info-process transform` edits the file in place and recomputes those counters.
       - name: Filter coverage data (info-process)
         shell: bash
         working-directory: /workspace
@@ -238,6 +244,25 @@ jobs:
             echo "::error::test sources still present in coverage.info after filtering"
             exit 1
           fi
+
+      - name: Compute coverage summary
+        id: coverage_summary
+        shell: bash
+        run: |
+          awk -F: '
+            /^LF:/ { lf += $2 }
+            /^LH:/ { lh += $2 }
+            /^BRF:/ { brf += $2 }
+            /^BRH:/ { brh += $2 }
+            END {
+              line_pct = (lf > 0) ? (lh / lf * 100) : 0
+              branch_pct = (brf > 0) ? (brh / brf * 100) : 0
+              printf "line_pct=%.2f\n", line_pct
+              printf "branch_pct=%.2f\n", branch_pct
+              printf "lines=%d/%d\n", lh, lf
+              printf "branches=%d/%d\n", brh, brf
+            }
+          ' /workspace/coverage_data/coverage.info >> "$GITHUB_OUTPUT"
 
       - name: Prepare coverview data
         shell: bash
@@ -335,6 +360,21 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: /tmp/coverview/dist
+
+      - name: Comment coverage summary on PR
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: coverage
+          message: |
+            ### Coverage report
+
+            | Metric | Coverage |
+            | --- | --- |
+            | Lines | ${{ steps.coverage_summary.outputs.line_pct }}% (${{ steps.coverage_summary.outputs.lines }}) |
+            | Branches | ${{ steps.coverage_summary.outputs.branch_pct }}% (${{ steps.coverage_summary.outputs.branches }}) |
+
+            Full report artifacts (`coverage-data`, `coverview-site`): ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
   deploy:
     if: ${{ github.ref == 'refs/heads/master' && github.event_name != 'pull_request' }}
