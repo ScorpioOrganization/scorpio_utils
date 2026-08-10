@@ -147,3 +147,6 @@
       throw E(__VA_ARGS__); \
     } \
   } while(0)
+
+#define SCU_UNLIKELY_UNCOV(x) SCU_UNLIKELY(x)
+#define SCU_UNLIKELY_THROW_IF_UNCOV(...) SCU_UNLIKELY_THROW_IF(__VA_ARGS__)
