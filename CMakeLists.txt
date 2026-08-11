@@ -123,6 +123,7 @@ if(BUILD_TESTING)
     geometry/test_position.cpp
     geometry/test_quaternion.cpp
     geometry/test_utils.cpp
+    geometry/test_affine_transformation.cpp
     gps/test_localization_converter.cpp
     network/test_orderer.cpp
     network/test_scorpio_udp.cpp

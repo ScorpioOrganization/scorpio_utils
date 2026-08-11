@@ -30,16 +30,16 @@ struct CoordinateSystemTransformation {
 };
 
 template<typename T>
-inline Point<double> transform_point(const CoordinateSystemTransformation& transform, const Point<T>& point) {
+inline Point<double> transform_point(const CoordinateSystemTransformation transform, const Point<T> point) {
   return rotate(point, transform.rotation) + transform.displacement_vector;
 }
 
 template<typename T>
 inline CoordinateSystemTransformation transform_from_points(
-  const Point<T>& first_point_in_first_system,
-  const Point<T>& second_point_in_first_system,
-  const Point<T>& first_point_in_second_system,
-  const Point<T>& second_point_in_second_system) {
+  const Point<T> first_point_in_first_system,
+  const Point<T> second_point_in_first_system,
+  const Point<T> first_point_in_second_system,
+  const Point<T> second_point_in_second_system) {
   const auto rotation = get_angle(first_point_in_second_system, second_point_in_second_system) - get_angle(
       first_point_in_first_system, second_point_in_first_system);
   const auto rotated_anchor = rotate(first_point_in_first_system, rotation);
