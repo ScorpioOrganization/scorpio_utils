@@ -1,0 +1,115 @@
+/*
+ * scorpio_utils - Scorpio Utility Library for C++
+ * Copyright (C) 2026 Igor Zaworski
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#include <gtest/gtest.h>
+#include <cmath>
+#include "scorpio_utils/geometry/affine_transformation.hpp"
+#include "scorpio_utils/geometry/point.hpp"
+#include "scorpio_utils/geometry/utils.hpp"
+
+// all tests were made based on this simualtion in goegebra https://www.geogebra.org/graphing/g3mkvegy. Some rotations and displacements vectors were taken randomly and some are specific edge cases.
+
+namespace scorpio_utils::geometry {
+
+constexpr double EPSILON = 1e-3;
+
+double degrees_to_radians(double degrees) {
+  return degrees * M_PI / 180.0;
+}
+
+
+class CoordinateSystemTestQuadrantI : public ::testing::Test {
+protected:
+  static constexpr Point<double> first_point_first_xy_plane{2.0, 1.0};
+  static constexpr Point<double> second_point_first_xy_plane{1.0, 3.0};
+};
+
+
+TEST_F(CoordinateSystemTestQuadrantI, IdenticalAxisTest0Rotation) {
+  double rotation = degrees_to_radians(0.0);
+  double displacement_x = 0.0;
+  double displacement_y = 0.0;
+
+  const Point<double> first_point_second_xy_plane{2.0, 1.0};
+  const Point<double> second_point_second_xy_plane{1.0, 3.0};
+
+  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane, second_point_second_xy_plane);
+  EXPECT_NEAR(result.rotation, degrees_to_radians(rotation), EPSILON) << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
+  EXPECT_NEAR(result.displacement_vector.x, displacement_x, EPSILON) << "Expected displacement vector x to be " << displacement_x << " for points: (" << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
+  EXPECT_NEAR(result.displacement_vector.y, displacement_y, EPSILON) << "Expected displacement vector y to be " << displacement_y << " for points: (" << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y<< ") to (" << first_point_second_xy_plane.x<< ", " << first_point_second_xy_plane.y<< ") and (" << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y<< ").";
+  EXPECT_NEAR(first_point_second_xy_plane.x, transform_point(result, first_point_first_xy_plane).x, EPSILON) << "Expected first point in second coordinate system to be (" << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") but got (" << transform_point(result, first_point_first_xy_plane).x << ", " << transform_point(result, first_point_first_xy_plane).y << ").";
+  EXPECT_NEAR(first_point_second_xy_plane.y, transform_point(result, first_point_first_xy_plane).y, EPSILON) << "Expected first point in second coordinate system to be (" << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") but got (" << transform_point(result, first_point_first_xy_plane).x << ", " << transform_point(result, first_point_first_xy_plane).y << ").";
+  EXPECT_NEAR(second_point_second_xy_plane.x, transform_point(result, second_point_first_xy_plane).x, EPSILON) << "Expected second point in second coordinate system to be (" << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ") but got (" << transform_point(result, second_point_first_xy_plane).x << ", " << transform_point(result, second_point_first_xy_plane).y << ").";
+  EXPECT_NEAR(second_point_second_xy_plane.y, transform_point(result, second_point_first_xy_plane).y, EPSILON) << "Expected second point in second coordinate system to be (" << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ") but got (" << transform_point(result, second_point_first_xy_plane).x << ", " << transform_point(result, second_point_first_xy_plane).y << ").";
+}
+
+TEST_F(CoordinateSystemTestQuadrantI, IdenticalAxisTestminus180Rotation) {
+  double rotation = degrees_to_radians(-180.0);
+  double displacement_x = 0.0;
+  double displacement_y = 0.0;
+
+  const Point<double> first_point_second_xy_plane{-2.0, -1.0}; 
+  const Point<double> second_point_second_xy_plane{-1.0, -3.0};
+
+  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane, second_point_second_xy_plane);
+  EXPECT_NEAR(result.rotation, rotation, EPSILON) << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
+  EXPECT_NEAR(result.displacement_vector.x, displacement_x, EPSILON) << "Expected displacement vector x to be " << displacement_x << " for points: (" << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
+  EXPECT_NEAR(result.displacement_vector.y, displacement_y, EPSILON) << "Expected displacement vector y to be " << displacement_y << " for points: (" << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y<< ") to (" << first_point_second_xy_plane.x<< ", " << first_point_second_xy_plane.y<< ") and (" << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y<< ").";
+  
+}
+
+TEST_F(CoordinateSystemTestQuadrantI, IdenticalAxisTestminus104Rotation) {
+  double rotation = degrees_to_radians(-104.0);
+  
+  double displacement_x = 0.0;
+  double displacement_y = 0.0;
+
+  const Point<double> first_point_second_xy_plane{0.4864519350767, -2.1825133481517}; 
+  const Point<double> second_point_second_xy_plane{2.6689652832283, -1.696061413075};
+
+  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane, second_point_second_xy_plane);
+  EXPECT_NEAR(result.rotation, rotation, EPSILON) << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
+  EXPECT_NEAR(result.displacement_vector.x, displacement_x, EPSILON) << "Expected displacement vector x to be " << displacement_x << " for points: (" << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
+  EXPECT_NEAR(result.displacement_vector.y, displacement_y, EPSILON) << "Expected displacement vector y to be " << displacement_y << " for points: (" << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y<< ") to (" << first_point_second_xy_plane.x<< ", " << first_point_second_xy_plane.y<< ") and (" << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y<< ").";
+  EXPECT_NEAR(first_point_second_xy_plane.x, transform_point(result, first_point_first_xy_plane).x, EPSILON) << "Expected first point in second coordinate system to be (" << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") but got (" << transform_point(result, first_point_first_xy_plane).x << ", " << transform_point(result, first_point_first_xy_plane).y << ").";
+  EXPECT_NEAR(first_point_second_xy_plane.y, transform_point(result, first_point_first_xy_plane).y, EPSILON) << "Expected first point in second coordinate system to be (" << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") but got (" << transform_point(result, first_point_first_xy_plane).x << ", " << transform_point(result, first_point_first_xy_plane).y << ").";
+  EXPECT_NEAR(second_point_second_xy_plane.x, transform_point(result, second_point_first_xy_plane).x, EPSILON) << "Expected second point in second coordinate system to be (" << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ") but got (" << transform_point(result, second_point_first_xy_plane).x << ", " << transform_point(result, second_point_first_xy_plane).y << ").";
+  EXPECT_NEAR(second_point_second_xy_plane.y, transform_point(result, second_point_first_xy_plane).y, EPSILON) << "Expected second point in second coordinate system to be (" << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ") but got (" << transform_point(result, second_point_first_xy_plane).x << ", " << transform_point(result, second_point_first_xy_plane).y << ").";
+}
+
+TEST_F(CoordinateSystemTestQuadrantI, NonIdenticalAxisTestminus64Rotation) {
+  double rotation = degrees_to_radians(-64.0);
+  Point<double> displacement_vector{-0.5, -1.3};
+  displacement_vector = rotate(displacement_vector, rotation);
+
+  const Point<double> first_point_second_xy_plane{0.3879185062939,-1.4797024134855}; 
+  const Point<double> second_point_second_xy_plane{1.7471354521031, 0.2958339263918};
+
+  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane, second_point_second_xy_plane);
+  EXPECT_NEAR(result.rotation, rotation, EPSILON) << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
+  EXPECT_NEAR(result.displacement_vector.x, displacement_vector.x, EPSILON) << "Expected displacement vector x to be " << displacement_vector.x << " for points: (" << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
+  EXPECT_NEAR(result.displacement_vector.y, displacement_vector.y, EPSILON) << "Expected displacement vector y to be " << displacement_vector.y << " for points: (" << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y<< ") to (" << first_point_second_xy_plane.x<< ", " << first_point_second_xy_plane.y<< ") and (" << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y<< ").";
+  EXPECT_NEAR(first_point_second_xy_plane.x, transform_point(result, first_point_first_xy_plane).x, EPSILON) << "Expected first point in second coordinate system to be (" << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") but got (" << transform_point(result, first_point_first_xy_plane).x << ", " << transform_point(result, first_point_first_xy_plane).y << ").";
+  EXPECT_NEAR(first_point_second_xy_plane.y, transform_point(result, first_point_first_xy_plane).y, EPSILON) << "Expected first point in second coordinate system to be (" << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") but got (" << transform_point(result, first_point_first_xy_plane).x << ", " << transform_point(result, first_point_first_xy_plane).y << ").";
+  EXPECT_NEAR(second_point_second_xy_plane.x, transform_point(result, second_point_first_xy_plane).x, EPSILON) << "Expected second point in second coordinate system to be (" << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ") but got (" << transform_point(result, second_point_first_xy_plane).x << ", " << transform_point(result, second_point_first_xy_plane).y << ").";
+  EXPECT_NEAR(second_point_second_xy_plane.y, transform_point(result, second_point_first_xy_plane).y, EPSILON) << "Expected second point in second coordinate system to be (" << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ") but got (" << transform_point(result, second_point_first_xy_plane).x << ", " << transform_point(result, second_point_first_xy_plane).y << ").";
+}
+
+
+
+}  // namespace scorpio_utils::geometry
