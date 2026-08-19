@@ -40,6 +40,8 @@ inline CoordinateSystemTransformation transform_from_points(
   const Point<T> second_point_in_first_system,
   const Point<T> first_point_in_second_system,
   const Point<T> second_point_in_second_system) {
+  SCU_ASSERT(first_point_in_first_system != second_point_in_first_system);
+  SCU_ASSERT(first_point_in_second_system != second_point_in_second_system);
   const auto rotation = get_angle(first_point_in_second_system, second_point_in_second_system) - get_angle(
       first_point_in_first_system, second_point_in_first_system);
   const auto rotated_anchor = rotate(first_point_in_first_system, rotation);
