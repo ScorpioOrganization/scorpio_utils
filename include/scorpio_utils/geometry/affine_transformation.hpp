@@ -67,7 +67,7 @@ inline Point<double> transform_point(const AffineTransformationMatrix transform,
 }
 
 /*
-  This function computes the affine transformation matrix based on two pairs of corresponding points in two different 
+  This function computes the affine transformation matrix based on two pairs of corresponding points in two different
   coordinate systems.
   The transformation includes only translation and rotation.
   Because we only consider translation and rotation in this function, therefore the matrix is constructed as follows:
