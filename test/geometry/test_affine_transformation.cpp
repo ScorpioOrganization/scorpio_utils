@@ -29,17 +29,8 @@ namespace scorpio_utils::geometry {
 
 constexpr double EPSILON = 1e-3;
 
-double degrees_to_radians(double degrees) { return degrees * M_PI / 180.0; }
-
-::testing::AssertionResult angles_near(double actual, double expected, double epsilon) {
-  const double delta = actual - expected;
-  const double wrapped_difference = std::abs(std::atan2(std::sin(delta), std::cos(delta)));
-  if (wrapped_difference <= epsilon) {
-    return ::testing::AssertionSuccess();
-  }
-  return ::testing::AssertionFailure() << actual << " rad is not within " << epsilon << " rad of " << expected
-                                       << " rad (difference modulo a full turn: " << wrapped_difference << " rad). ";
-}
+double degrees_to_radians(double degrees) { return std::remainder(degrees * M_PI / 180.0, 2 * M_PI); }
+double rotation_of(const AffineTransformationMatrix& transform) { return std::atan2(transform.c, transform.a); }
 
 class CoordinateSystemTestPointsInQuadrantI : public ::testing::Test {
 protected:
@@ -63,23 +54,25 @@ TEST_F(CoordinateSystemTestPointsInQuadrantI, IdenticalOriginTest0Rotation) {
   const Point<double> second_point_second_xy_plane{ 1.0, 3.0 };
   const Point<double> arbitrary_point_second_xy_plane{ 4, 6 };
 
-  // Our transform_from_points function should return the same rotation and displacement vector as we defined above.
-  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane,
-                                      first_point_second_xy_plane, second_point_second_xy_plane);
+  // Our affine_transform_from_points_only_translation_and_rotation function should return the same rotation and
+  // displacement vector as we defined above.
+  auto result = affine_transform_from_points_only_translation_and_rotation(
+      first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane,
+      second_point_second_xy_plane);
 
-  EXPECT_TRUE(angles_near(result.rotation, rotation, EPSILON))
+  EXPECT_NEAR(rotation_of(result), rotation, EPSILON)
       << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", "
       << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", "
       << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", "
       << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", "
       << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.x, displacement_vector.x, EPSILON)
+  EXPECT_NEAR(result.tx, displacement_vector.x, EPSILON)
       << "Expected displacement vector x to be " << displacement_vector.x << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
       << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and ("
       << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.y, displacement_vector.y, EPSILON)
+  EXPECT_NEAR(result.ty, displacement_vector.y, EPSILON)
       << "Expected displacement vector y to be " << displacement_vector.y << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
@@ -120,22 +113,23 @@ TEST_F(CoordinateSystemTestPointsInQuadrantI, IdenticalOriginTestminus180Rotatio
   const Point<double> second_point_second_xy_plane{ -1.0, -3.0 };
   const Point<double> arbitrary_point_second_xy_plane{ -4.0, -6.0 };
 
-  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane,
-                                      first_point_second_xy_plane, second_point_second_xy_plane);
+  auto result = affine_transform_from_points_only_translation_and_rotation(
+      first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane,
+      second_point_second_xy_plane);
 
-  EXPECT_TRUE(angles_near(result.rotation, rotation, EPSILON))
+  EXPECT_NEAR(rotation_of(result), rotation, EPSILON)
       << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", "
       << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", "
       << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", "
       << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", "
       << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.x, displacement_vector.x, EPSILON)
+  EXPECT_NEAR(result.tx, displacement_vector.x, EPSILON)
       << "Expected displacement vector x to be " << displacement_vector.x << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
       << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and ("
       << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.y, displacement_vector.y, EPSILON)
+  EXPECT_NEAR(result.ty, displacement_vector.y, EPSILON)
       << "Expected displacement vector y to be " << displacement_vector.y << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
@@ -177,21 +171,22 @@ TEST_F(CoordinateSystemTestPointsInQuadrantI, IdenticalOriginTestminus104Rotatio
   const Point<double> second_point_second_xy_plane{ 2.6689652832283, -1.696061413075 };
   const Point<double> arbitrary_point_second_xy_plane{ 4.8540867752573, -5.332714278702 };
 
-  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane,
-                                      first_point_second_xy_plane, second_point_second_xy_plane);
-  EXPECT_TRUE(angles_near(result.rotation, rotation, EPSILON))
+  auto result = affine_transform_from_points_only_translation_and_rotation(
+      first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane,
+      second_point_second_xy_plane);
+  EXPECT_NEAR(rotation_of(result), rotation, EPSILON)
       << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", "
       << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", "
       << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", "
       << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", "
       << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.x, displacement_vector.x, EPSILON)
+  EXPECT_NEAR(result.tx, displacement_vector.x, EPSILON)
       << "Expected displacement vector x to be " << displacement_vector.x << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
       << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and ("
       << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.y, displacement_vector.y, EPSILON)
+  EXPECT_NEAR(result.ty, displacement_vector.y, EPSILON)
       << "Expected displacement vector y to be " << displacement_vector.y << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
@@ -232,21 +227,22 @@ TEST_F(CoordinateSystemTestPointsInQuadrantI, NonIdenticalOriginTestminus64Rotat
   const Point<double> second_point_second_xy_plane{ 1.7471354521031, 0.2958339263918 };
   const Point<double> arbitrary_point_second_xy_plane{ 5.7586310313679, -1.0854347721384 };
 
-  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane,
-                                      first_point_second_xy_plane, second_point_second_xy_plane);
-  EXPECT_TRUE(angles_near(result.rotation, rotation, EPSILON))
+  auto result = affine_transform_from_points_only_translation_and_rotation(
+      first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane,
+      second_point_second_xy_plane);
+  EXPECT_NEAR(rotation_of(result), rotation, EPSILON)
       << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", "
       << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", "
       << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", "
       << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", "
       << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.x, displacement_vector.x, EPSILON)
+  EXPECT_NEAR(result.tx, displacement_vector.x, EPSILON)
       << "Expected displacement vector x to be " << displacement_vector.x << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
       << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and ("
       << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.y, displacement_vector.y, EPSILON)
+  EXPECT_NEAR(result.ty, displacement_vector.y, EPSILON)
       << "Expected displacement vector y to be " << displacement_vector.y << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
@@ -287,21 +283,22 @@ TEST_F(CoordinateSystemTestPointsInQuadrantI, NonIdenticalOriginTestminus88Rotat
   const Point<double> second_point_second_xy_plane{ 5.7663267074138, -1.7998545228339 };
   const Point<double> arbitrary_point_second_xy_plane{ 8.8691976785786, -4.6933285137837 };
 
-  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane,
-                                      first_point_second_xy_plane, second_point_second_xy_plane);
-  EXPECT_TRUE(angles_near(result.rotation, rotation, EPSILON))
+  auto result = affine_transform_from_points_only_translation_and_rotation(
+      first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane,
+      second_point_second_xy_plane);
+  EXPECT_NEAR(rotation_of(result), rotation, EPSILON)
       << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", "
       << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", "
       << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", "
       << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", "
       << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.x, displacement_vector.x, EPSILON)
+  EXPECT_NEAR(result.tx, displacement_vector.x, EPSILON)
       << "Expected displacement vector x to be " << displacement_vector.x << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
       << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and ("
       << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.y, displacement_vector.y, EPSILON)
+  EXPECT_NEAR(result.ty, displacement_vector.y, EPSILON)
       << "Expected displacement vector y to be " << displacement_vector.y << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
@@ -342,21 +339,22 @@ TEST_F(CoordinateSystemTestPointsInQuadrantI, NonIdenticalOriginTestminus114Rota
   const Point<double> second_point_second_xy_plane{ 3.7729788449372, -6.2773107805537 };
   const Point<double> arbitrary_point_second_xy_plane{ 5.2934052886376, -10.2381570827089 };
 
-  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane,
-                                      first_point_second_xy_plane, second_point_second_xy_plane);
-  EXPECT_TRUE(angles_near(result.rotation, rotation, EPSILON))
+  auto result = affine_transform_from_points_only_translation_and_rotation(
+      first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane,
+      second_point_second_xy_plane);
+  EXPECT_NEAR(rotation_of(result), rotation, EPSILON)
       << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", "
       << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", "
       << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", "
       << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", "
       << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.x, displacement_vector.x, EPSILON)
+  EXPECT_NEAR(result.tx, displacement_vector.x, EPSILON)
       << "Expected displacement vector x to be " << displacement_vector.x << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
       << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and ("
       << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.y, displacement_vector.y, EPSILON)
+  EXPECT_NEAR(result.ty, displacement_vector.y, EPSILON)
       << "Expected displacement vector y to be " << displacement_vector.y << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
@@ -397,21 +395,22 @@ TEST_F(CoordinateSystemTestPointsInQuadrantI, NonIdenticalOriginTestminus194Rota
   const Point<double> second_point_second_xy_plane{ -4.4381248937587, -0.4393716278954 };
   const Point<double> arbitrary_point_second_xy_plane{ -8.0747777593857, -2.6244931199244 };
 
-  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane,
-                                      first_point_second_xy_plane, second_point_second_xy_plane);
-  EXPECT_TRUE(angles_near(result.rotation, rotation, EPSILON))
+  auto result = affine_transform_from_points_only_translation_and_rotation(
+      first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane,
+      second_point_second_xy_plane);
+  EXPECT_NEAR(rotation_of(result), rotation, EPSILON)
       << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", "
       << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", "
       << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", "
       << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", "
       << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.x, displacement_vector.x, EPSILON)
+  EXPECT_NEAR(result.tx, displacement_vector.x, EPSILON)
       << "Expected displacement vector x to be " << displacement_vector.x << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
       << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and ("
       << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.y, displacement_vector.y, EPSILON)
+  EXPECT_NEAR(result.ty, displacement_vector.y, EPSILON)
       << "Expected displacement vector y to be " << displacement_vector.y << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
@@ -452,21 +451,22 @@ TEST_F(CoordinateSystemTestPointsInQuadrantI, NonIdenticalOriginTestminus98Rotat
   const Point<double> second_point_second_xy_plane{ 4.5536274800091, 0.0669086937988 };
   const Point<double> arbitrary_point_second_xy_plane{ 7.1069123833536, -3.3214148153061 };
 
-  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane,
-                                      first_point_second_xy_plane, second_point_second_xy_plane);
-  EXPECT_TRUE(angles_near(result.rotation, rotation, EPSILON))
+  auto result = affine_transform_from_points_only_translation_and_rotation(
+      first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane,
+      second_point_second_xy_plane);
+  EXPECT_NEAR(rotation_of(result), rotation, EPSILON)
       << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", "
       << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", "
       << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", "
       << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", "
       << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.x, displacement_vector.x, EPSILON)
+  EXPECT_NEAR(result.tx, displacement_vector.x, EPSILON)
       << "Expected displacement vector x to be " << displacement_vector.x << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
       << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and ("
       << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.y, displacement_vector.y, EPSILON)
+  EXPECT_NEAR(result.ty, displacement_vector.y, EPSILON)
       << "Expected displacement vector y to be " << displacement_vector.y << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
@@ -507,21 +507,22 @@ TEST_F(CoordinateSystemTestPointsInQuadrantI, NonIdenticalOriginTestminus39Rotat
   const Point<double> second_point_second_xy_plane{ 4.616000346861, 4.1112699738377 };
   const Point<double> arbitrary_point_second_xy_plane{ 8.8353994043814, 4.5547466850591 };
 
-  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane,
-                                      first_point_second_xy_plane, second_point_second_xy_plane);
-  EXPECT_TRUE(angles_near(result.rotation, rotation, EPSILON))
+  auto result = affine_transform_from_points_only_translation_and_rotation(
+      first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane,
+      second_point_second_xy_plane);
+  EXPECT_NEAR(rotation_of(result), rotation, EPSILON)
       << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", "
       << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", "
       << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", "
       << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", "
       << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.x, displacement_vector.x, EPSILON)
+  EXPECT_NEAR(result.tx, displacement_vector.x, EPSILON)
       << "Expected displacement vector x to be " << displacement_vector.x << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
       << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and ("
       << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.y, displacement_vector.y, EPSILON)
+  EXPECT_NEAR(result.ty, displacement_vector.y, EPSILON)
       << "Expected displacement vector y to be " << displacement_vector.y << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
@@ -569,21 +570,22 @@ TEST_F(CoordinateSystemTestPointsInQuadrantII, NonIdenticalOriginTestminus39Rota
   const Point<double> second_point_second_xy_plane{ 2.147263185593, 5.062249735894 };
   const Point<double> arbitrary_point_second_xy_plane{ 4.2153222683322, -1.6899767511588 };
 
-  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane,
-                                      first_point_second_xy_plane, second_point_second_xy_plane);
-  EXPECT_TRUE(angles_near(result.rotation, rotation, EPSILON))
+  auto result = affine_transform_from_points_only_translation_and_rotation(
+      first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane,
+      second_point_second_xy_plane);
+  EXPECT_NEAR(rotation_of(result), rotation, EPSILON)
       << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", "
       << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", "
       << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", "
       << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", "
       << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.x, displacement_vector.x, EPSILON)
+  EXPECT_NEAR(result.tx, displacement_vector.x, EPSILON)
       << "Expected displacement vector x to be " << displacement_vector.x << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
       << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and ("
       << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.y, displacement_vector.y, EPSILON)
+  EXPECT_NEAR(result.ty, displacement_vector.y, EPSILON)
       << "Expected displacement vector y to be " << displacement_vector.y << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
@@ -624,21 +626,22 @@ TEST_F(CoordinateSystemTestPointsInQuadrantII, NonIdenticalOriginTestminus82Rota
   const Point<double> second_point_second_xy_plane{ 1.4054318817911, 3.5471590921404 };
   const Point<double> arbitrary_point_second_xy_plane{ -1.687092843821, -2.8015196462772 };
 
-  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane,
-                                      first_point_second_xy_plane, second_point_second_xy_plane);
-  EXPECT_TRUE(angles_near(result.rotation, rotation, EPSILON))
+  auto result = affine_transform_from_points_only_translation_and_rotation(
+      first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane,
+      second_point_second_xy_plane);
+  EXPECT_NEAR(rotation_of(result), rotation, EPSILON)
       << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", "
       << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", "
       << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", "
       << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", "
       << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.x, displacement_vector.x, EPSILON)
+  EXPECT_NEAR(result.tx, displacement_vector.x, EPSILON)
       << "Expected displacement vector x to be " << displacement_vector.x << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
       << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and ("
       << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.y, displacement_vector.y, EPSILON)
+  EXPECT_NEAR(result.ty, displacement_vector.y, EPSILON)
       << "Expected displacement vector y to be " << displacement_vector.y << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
@@ -679,21 +682,22 @@ TEST_F(CoordinateSystemTestPointsInQuadrantII, IdenticalOriginTestminus192Rotati
   const Point<double> second_point_second_xy_plane{ 1.0295140214271, -2.4530770661773 };
   const Point<double> arbitrary_point_second_xy_plane{ -3.8785867909123, 2.6243216101205 };
 
-  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane,
-                                      first_point_second_xy_plane, second_point_second_xy_plane);
-  EXPECT_TRUE(angles_near(result.rotation, rotation, EPSILON))
+  auto result = affine_transform_from_points_only_translation_and_rotation(
+      first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane,
+      second_point_second_xy_plane);
+  EXPECT_NEAR(rotation_of(result), rotation, EPSILON)
       << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", "
       << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", "
       << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", "
       << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", "
       << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.x, displacement_vector.x, EPSILON)
+  EXPECT_NEAR(result.tx, displacement_vector.x, EPSILON)
       << "Expected displacement vector x to be " << displacement_vector.x << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
       << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and ("
       << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.y, displacement_vector.y, EPSILON)
+  EXPECT_NEAR(result.ty, displacement_vector.y, EPSILON)
       << "Expected displacement vector y to be " << displacement_vector.y << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
@@ -734,21 +738,22 @@ TEST_F(CoordinateSystemTestPointsInQuadrantII, NonIdenticalOriginTestminus234Rot
   const Point<double> second_point_second_xy_plane{ -3.2509147462909, -2.1357769080992 };
   const Point<double> arbitrary_point_second_xy_plane{ -3.5009016129054, 4.9216261177084 };
 
-  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane,
-                                      first_point_second_xy_plane, second_point_second_xy_plane);
-  EXPECT_TRUE(angles_near(result.rotation, rotation, EPSILON))
+  auto result = affine_transform_from_points_only_translation_and_rotation(
+      first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane,
+      second_point_second_xy_plane);
+  EXPECT_NEAR(rotation_of(result), rotation, EPSILON)
       << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", "
       << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", "
       << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", "
       << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", "
       << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.x, displacement_vector.x, EPSILON)
+  EXPECT_NEAR(result.tx, displacement_vector.x, EPSILON)
       << "Expected displacement vector x to be " << displacement_vector.x << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
       << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and ("
       << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.y, displacement_vector.y, EPSILON)
+  EXPECT_NEAR(result.ty, displacement_vector.y, EPSILON)
       << "Expected displacement vector y to be " << displacement_vector.y << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
@@ -792,21 +797,22 @@ TEST(EdgeCases, PointsOnYaxis) {
   const Point<double> first_point_second_xy_plane{ 0.0, 0.4 };
   const Point<double> second_point_second_xy_plane{ 0.0, 1.4 };
   const Point<double> arbitrary_point_second_xy_plane{ 0.0, 2.4 };
-  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane,
-                                      first_point_second_xy_plane, second_point_second_xy_plane);
-  EXPECT_TRUE(angles_near(result.rotation, rotation, EPSILON))
+  auto result = affine_transform_from_points_only_translation_and_rotation(
+      first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane,
+      second_point_second_xy_plane);
+  EXPECT_NEAR(rotation_of(result), rotation, EPSILON)
       << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", "
       << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", "
       << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", "
       << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", "
       << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.x, displacement_vector.x, EPSILON)
+  EXPECT_NEAR(result.tx, displacement_vector.x, EPSILON)
       << "Expected displacement vector x to be " << displacement_vector.x << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
       << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and ("
       << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.y, displacement_vector.y, EPSILON)
+  EXPECT_NEAR(result.ty, displacement_vector.y, EPSILON)
       << "Expected displacement vector y to be " << displacement_vector.y << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
@@ -850,21 +856,22 @@ TEST(EdgeCases, PointsOnXaxis) {
   const Point<double> first_point_second_xy_plane{ 6.0, 0.0 };
   const Point<double> second_point_second_xy_plane{ 5.0, 0.0 };
   const Point<double> arbitrary_point_second_xy_plane{ 7.0, 0.0 };
-  auto result = transform_from_points(first_point_first_xy_plane, second_point_first_xy_plane,
-                                      first_point_second_xy_plane, second_point_second_xy_plane);
-  EXPECT_TRUE(angles_near(result.rotation, rotation, EPSILON))
+  auto result = affine_transform_from_points_only_translation_and_rotation(
+      first_point_first_xy_plane, second_point_first_xy_plane, first_point_second_xy_plane,
+      second_point_second_xy_plane);
+  EXPECT_NEAR(rotation_of(result), rotation, EPSILON)
       << "Expected rotation to be " << rotation << " for points: (" << first_point_first_xy_plane.x << ", "
       << first_point_first_xy_plane.y << ") and (" << second_point_first_xy_plane.x << ", "
       << second_point_first_xy_plane.y << ") to (" << first_point_second_xy_plane.x << ", "
       << first_point_second_xy_plane.y << ") and (" << second_point_second_xy_plane.x << ", "
       << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.x, displacement_vector.x, EPSILON)
+  EXPECT_NEAR(result.tx, displacement_vector.x, EPSILON)
       << "Expected displacement vector x to be " << displacement_vector.x << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
       << first_point_second_xy_plane.x << ", " << first_point_second_xy_plane.y << ") and ("
       << second_point_second_xy_plane.x << ", " << second_point_second_xy_plane.y << ").";
-  EXPECT_NEAR(result.displacement_vector.y, displacement_vector.y, EPSILON)
+  EXPECT_NEAR(result.ty, displacement_vector.y, EPSILON)
       << "Expected displacement vector y to be " << displacement_vector.y << " for points: ("
       << first_point_first_xy_plane.x << ", " << first_point_first_xy_plane.y << ") and ("
       << second_point_first_xy_plane.x << ", " << second_point_first_xy_plane.y << ") to ("
