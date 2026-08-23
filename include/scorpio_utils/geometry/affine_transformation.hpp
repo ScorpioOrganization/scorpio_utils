@@ -67,7 +67,8 @@ inline Point<double> transform_point(const AffineTransformationMatrix transform,
 }
 
 /*
-  This function computes the affine transformation matrix based on two pairs of corresponding points in two different coordinate systems.
+  This function computes the affine transformation matrix based on two pairs of corresponding points in two different 
+  coordinate systems.
   The transformation includes only translation and rotation.
   Because we only consider translation and rotation in this function, therefore the matrix is constructed as follows:
 
@@ -87,7 +88,8 @@ inline AffineTransformationMatrix affine_transform_from_points_only_translation_
   "The two points in the first coordinate system must be distinct.");
   SCU_ASSERT(!second_point_in_second_system.equal_with_threshold(first_point_in_second_system, SAME_DISTANCE_EPSILON),
   "The two points in the second coordinate system must be distinct.");
-  const auto rotation = std::remainder(get_angle(first_point_in_second_system, second_point_in_second_system) - get_angle(
+  const auto rotation = std::remainder(get_angle(first_point_in_second_system,
+                                                 second_point_in_second_system) - get_angle(
       first_point_in_first_system, second_point_in_first_system), 2 * M_PI);
   const auto rotated_anchor = rotate(first_point_in_first_system, rotation);
   return AffineTransformationMatrix{
