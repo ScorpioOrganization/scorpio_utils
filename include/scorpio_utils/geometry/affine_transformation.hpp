@@ -30,17 +30,17 @@ namespace scorpio_utils::geometry {
 constexpr double SAME_DISTANCE_EPSILON = 1e-10;
 
 /*
-  AffineTransformationMatrix represents a 2D affine transformation matrix.
-  The matrix is represented in the form:
-  [ a  b  tx ]
-  [ c  d  ty ]
-  [ 0  0   1 ]
-
-  where (a, b, c, d) represent the linear transformation (rotation, scaling, shearing),
-  and (tx, ty) represent the translation.distance
-
-  The default values correspond to the identity transformation.
-*/
+ * AffineTransformationMatrix represents a 2D affine transformation matrix.
+ * The matrix is represented in the form:
+ * [ a  b  tx ]
+ * [ c  d  ty ]
+ * [ 0  0   1 ]
+ *
+ * where (a, b, c, d) represent the linear transformation (rotation, scaling, shearing),
+ * and (tx, ty) represent the translation.distance
+ *
+ * The default values correspond to the identity transformation.
+ */
 struct AffineTransformationMatrix {
   double a = 1.0, b = 0.0;
   double c = 0.0, d = 1.0;
@@ -52,12 +52,12 @@ struct AffineTransformationMatrix {
   const double one = 1.0;
 };
 /*
-  This function transforms points using the affine transformation matrix as follows:
-
-  [ a  b  tx ][ x ]   [ax + by + tx]   [x_new]
-  [ c  d  ty ][ y ] = [cx + dy + ty] = [y_new]
-  [ 0  0  1  ][ 1 ]   [0x + 0y + 1 ]   [1]
-*/
+ * This function transforms points using the affine transformation matrix as follows:
+ *
+ * [ a  b  tx ][ x ]   [ax + by + tx]   [x_new]
+ * [ c  d  ty ][ y ] = [cx + dy + ty] = [y_new]
+ * [ 0  0  1  ][ 1 ]   [0x + 0y + 1 ]   [1]
+ */
 template<typename T>
 inline Point<double> transform_point(const AffineTransformationMatrix transform, const Point<T> point) {
   return Point<double>{
@@ -67,17 +67,17 @@ inline Point<double> transform_point(const AffineTransformationMatrix transform,
 }
 
 /*
-  This function computes the affine transformation matrix based on two pairs of corresponding points in two different
-  coordinate systems.
-  The transformation includes only translation and rotation.
-  Because we only consider translation and rotation in this function, therefore the matrix is constructed as follows:
-
-  [ cos(theta)  -sin(theta)  tx ]
-  [ sin(theta)   cos(theta)  ty ]
-  [     0            0        1  ]
-
-  where theta is the rotation angle, and (tx, ty) is the translation vector.
-*/
+ * This function computes the affine transformation matrix based on two pairs of corresponding points in two different
+ * coordinate systems.
+ * The transformation includes only translation and rotation.
+ * Because we only consider translation and rotation in this function, therefore the matrix is constructed as follows:
+ *
+ * [ cos(theta)  -sin(theta)  tx ]
+ * [ sin(theta)   cos(theta)  ty ]
+ * [     0            0        1  ]
+ *
+ * where theta is the rotation angle, and (tx, ty) is the translation vector.
+ */
 template<typename T>
 inline AffineTransformationMatrix affine_transform_from_points_only_translation_and_rotation(
   const Point<T> first_point_in_first_system,
