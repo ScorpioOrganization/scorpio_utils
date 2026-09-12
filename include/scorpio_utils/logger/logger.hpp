@@ -5,7 +5,7 @@
 #include <sstream>
 #include <type_traits>
 #include <utility>
-#include "scorpio_utils/magic_enum_include.hpp"
+#include "magic_enum/magic_enum.hpp"
 #include "scorpio_utils/decorators.hpp"
 
 namespace scorpio_utils::logger {

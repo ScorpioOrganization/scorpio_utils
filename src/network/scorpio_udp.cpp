@@ -6,9 +6,9 @@
 #include <iomanip>
 #include <sstream>
 
+#include "magic_enum/magic_enum.hpp"
 #include "scorpio_utils/assert.hpp"
 #include "scorpio_utils/decorators.hpp"
-#include "scorpio_utils/magic_enum_include.hpp"
 #include "scorpio_utils/misc.hpp"
 #include "scorpio_utils/network/types.hpp"
 #include "scorpio_utils/sat_math.hpp"

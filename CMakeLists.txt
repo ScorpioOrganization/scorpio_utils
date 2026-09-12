@@ -6,7 +6,6 @@ find_package(backward_ros REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(fmt REQUIRED)
-find_package(magic_enum CONFIG REQUIRED)
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
     message(STATUS "Detected architecture: x64")
@@ -69,7 +68,7 @@ add_library(network SHARED
   src/network/scorpio_udp.cpp
   src/network/udp.cpp
 )
-target_link_libraries(network magic_enum::magic_enum fmt::fmt)
+target_link_libraries(network fmt::fmt)
 
 target_compile_definitions(network PRIVATE
   -DSCU_LOG_LEVEL=5
@@ -175,7 +174,7 @@ if(BUILD_TESTING)
     src/network/ip.cpp
     src/network/scorpio_udp.cpp
   )
-  target_link_libraries(network_mock fmt::fmt magic_enum::magic_enum)
+  target_link_libraries(network_mock fmt::fmt)
 
   # Test of mock_udp.cpp required for network tests
   ament_add_gtest(test_mock_udp test/network/test_udp.cpp)
@@ -220,7 +219,7 @@ if(BUILD_TESTING)
     src/network/ip.cpp
     src/network/scorpio_udp.cpp
   )
-  target_link_libraries(network_gmock fmt::fmt magic_enum::magic_enum)
+  target_link_libraries(network_gmock fmt::fmt)
   target_compile_options(network_gmock PRIVATE -std=gnu++17)
   target_compile_definitions(network_gmock PRIVATE
     -DSCORPIO_UTILS_UDP_GMOCK=1
@@ -254,7 +253,7 @@ if(BUILD_TESTING)
     src/network/ip.cpp
     src/network/scorpio_udp.cpp
   )
-  target_link_libraries(network_framework_test fmt::fmt magic_enum::magic_enum)
+  target_link_libraries(network_framework_test fmt::fmt)
   target_compile_definitions(network_framework_test PRIVATE
     -DSCORPIO_UTILS_FRAMEWORK=1
     -DSCU_LOG_LEVEL=5

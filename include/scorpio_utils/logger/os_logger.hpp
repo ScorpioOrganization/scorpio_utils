@@ -5,8 +5,8 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include "magic_enum/magic_enum.hpp"
 #include "scorpio_utils/logger/logger.hpp"
-#include "scorpio_utils/magic_enum_include.hpp"
 #include "scorpio_utils/threading/channel.hpp"
 #include "scorpio_utils/time_provider/system_time_provider.hpp"
 #include "scorpio_utils/time_utils/time_string.hpp"

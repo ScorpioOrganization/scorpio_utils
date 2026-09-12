@@ -71,7 +71,7 @@ jobs:
           source /opt/ros/${{ matrix.ROS_DISTRO }}/setup.bash
 
           cd src/scorpio_utils
-          find . -name "*.cpp" -o -name "*.hpp" -o -name "*.h" -o -name "*.cc" -o -name "*.cxx" -o -name "*.hh" -o -name "*.hxx" | grep -v external_packages | xargs -r ament_cpplint
+          find . -name "*.cpp" -o -name "*.hpp" -o -name "*.h" -o -name "*.cc" -o -name "*.cxx" -o -name "*.hh" -o -name "*.hxx" | grep -v external_packages | grep -v 'include/magic_enum/' | xargs -r ament_cpplint
 
       - name: Run ament_uncrustify
         if: matrix.ROS_DISTRO == 'humble'
@@ -80,7 +80,7 @@ jobs:
         run: |
           source /opt/ros/${{ matrix.ROS_DISTRO }}/setup.bash
           cd src/scorpio_utils
-          find . -name "*.cpp" -o -name "*.hpp" -o -name "*.h" -o -name "*.cc" -o -name "*.cxx" -o -name "*.hh" -o -name "*.hxx" | grep -v external_packages | xargs -r ament_uncrustify -c /workspace/src/scorpio_utils/uncrustify.cfg
+          find . -name "*.cpp" -o -name "*.hpp" -o -name "*.h" -o -name "*.cc" -o -name "*.cxx" -o -name "*.hh" -o -name "*.hxx" | grep -v external_packages | grep -v 'include/magic_enum/' | xargs -r ament_uncrustify -c /workspace/src/scorpio_utils/uncrustify.cfg
 
       - name: Run ament_black
         if: matrix.ROS_DISTRO == 'humble'
@@ -89,7 +89,7 @@ jobs:
         run: |
           source /opt/ros/${{ matrix.ROS_DISTRO }}/setup.bash
           cd src/scorpio_utils
-          find . -name "*.py" -not -path "*/launch/*" -not -path "*launch_ROS2*" -not -path "*external_packages*" | xargs -r ament_black
+          find . -name "*.py" -not -path "*/launch/*" -not -path "*launch_ROS2*" -not -path "*external_packages*" | grep -v 'include/magic_enum/' | xargs -r ament_black
 
       - name: Run ament_lint_cmake
         if: matrix.ROS_DISTRO == 'humble'
@@ -98,7 +98,7 @@ jobs:
         run: |
           source /opt/ros/${{ matrix.ROS_DISTRO }}/setup.bash
           cd src/scorpio_utils
-          find . -name "CMakeLists.txt" | grep -v external_packages | xargs -r ament_lint_cmake
+          find . -name "CMakeLists.txt" | grep -v external_packages | grep -v 'include/magic_enum/' | xargs -r ament_lint_cmake
 
       - name: Run ament_xmllint
         if: matrix.ROS_DISTRO == 'humble'
@@ -107,7 +107,7 @@ jobs:
         run: |
           source /opt/ros/${{ matrix.ROS_DISTRO }}/setup.bash
           cd src/scorpio_utils
-          find . -name "*.xml" | grep -v external_packages | xargs -r ament_xmllint
+          find . -name "*.xml" | grep -v external_packages | grep -v 'include/magic_enum/' | xargs -r ament_xmllint
 
       - name: Set timezone and install additional dependencies
         run: |
