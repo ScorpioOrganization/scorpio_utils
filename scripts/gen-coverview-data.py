@@ -31,12 +31,12 @@ def write_sources_txt(out_path: Path, repo_root: Path, rel_paths: list[str]):
             f.write("\n")
 
 
-def write_config_json(out_path: Path, args):
+def write_config_json(out_path: Path, title: str, repo: str, branch: str, commit: str):
     config = {
-        "title": "Scorpio Utils Coverage",
-        "repo": args.repo,
-        "branch": args.branch,
-        "commit": args.commit,
+        "title": title,
+        "repo": repo,
+        "branch": branch,
+        "commit": commit,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "datasets": {
             "colcon-test": {
@@ -53,13 +53,16 @@ def main():
     parser.add_argument("--repo-root", required=True, type=Path)
     parser.add_argument("--out-dir", required=True, type=Path)
     parser.add_argument("--repo", required=True)
+    parser.add_argument("--title", default="scorpio_utils repository coverage")
     parser.add_argument("--branch", required=True)
     parser.add_argument("--commit", required=True)
     args = parser.parse_args()
 
     rel_paths = extract_source_files(args.info)
     write_sources_txt(args.out_dir / "sources.txt", args.repo_root, rel_paths)
-    write_config_json(args.out_dir / "config.json", args)
+    write_config_json(
+        args.out_dir / "config.json", args.title, args.repo, args.branch, args.commit
+    )
 
 
 if __name__ == "__main__":

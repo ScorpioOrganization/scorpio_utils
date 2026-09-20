@@ -55,6 +55,9 @@ jobs:
         with:
           path: src/scorpio_utils
           submodules: recursive
+          # Patch coverage needs `git merge-base master HEAD`, which the default depth of 1
+          # cannot answer.
+          fetch-depth: 0
 
       - name: Setup ROS2 workspace
         run: |
@@ -97,11 +100,15 @@ jobs:
       - name: Install coverage dependencies
         shell: bash
         working-directory: /workspace
+        env:
+          # Pinned so an upstream change cannot silently break the coverage job.
+          FASTCOV_VERSION: "1.17"
+          INFO_PROCESS_REF: 63f8a031f31e514458ee4fc78c4b53a82301a218
         run: |
           python3 -m venv /workspace/.venv
           source /workspace/.venv/bin/activate
-          pip3 install fastcov
-          pip3 install git+https://github.com/antmicro/info-process.git
+          pip3 install "fastcov==${FASTCOV_VERSION}"
+          pip3 install "git+https://github.com/antmicro/info-process.git@${INFO_PROCESS_REF}"
 
       - name: Calculate files hash
         id: calculate_hash
@@ -133,7 +140,6 @@ jobs:
           path: ${{ github.workspace }}/.ccache
           key: ${{ runner.os }}-${{ runner.arch }}-ccache_coverage-${{ matrix.ROS_DISTRO }}-${{ github.ref }}-${{ steps.calculate_hash.outputs.C_FILES_HASH }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-ccache_coverage-${{ matrix.ROS_DISTRO }}-${{ github.ref }}-${{ steps.calculate_hash.outputs.C_FILES_HASH }}-${{ github.sha }}
             ${{ runner.os }}-${{ runner.arch }}-ccache_coverage-${{ matrix.ROS_DISTRO }}-${{ github.ref }}-${{ steps.calculate_hash.outputs.C_FILES_HASH }}-
             ${{ runner.os }}-${{ runner.arch }}-ccache_coverage-${{ matrix.ROS_DISTRO }}-${{ github.ref }}-
             ${{ runner.os }}-${{ runner.arch }}-ccache_coverage-${{ matrix.ROS_DISTRO }}-refs/heads/master-
@@ -181,8 +187,10 @@ jobs:
 
       - name: Save cache build artifacts - ccache
         uses: actions/cache/save@v4
-        # Without `(success() || failure()) && ` github implicitly adds `success() && `
-        if: (success() || failure()) && steps.restore-cache.outcome == 'success'
+        # `(success() || failure())` overrides github's implicit `success() && `, so a failed
+        # build still gets its partial cache saved. `cache-hit != 'true'` skips the upload on a
+        # rerun of the same commit, where the primary key already exists.
+        if: (success() || failure()) && steps.restore-cache.outputs.cache-hit != 'true'
         with:
           path: ${{ github.workspace }}/.ccache
           key: ${{ runner.os }}-${{ runner.arch }}-ccache_coverage-${{ matrix.ROS_DISTRO }}-${{ github.ref }}-${{ steps.calculate_hash.outputs.C_FILES_HASH }}-${{ github.sha }}
@@ -199,6 +207,47 @@ jobs:
         working-directory: /workspace
         run: |
           colcon test-result --verbose
+
+      # Patch coverage base. On a pull_request event the checked out HEAD is the merge commit, so
+      # the merge base against master is the master tip this run was built on.
+      - name: Compute patch diff
+        id: patch_diff
+        if: github.event_name == 'pull_request'
+        shell: bash
+        working-directory: /workspace/src/scorpio_utils
+        run: |
+          git config --global --add safe.directory /workspace/src/scorpio_utils
+
+          # Defensive: `fetch-depth: 0` already brings every branch in, but a fetch spec change
+          # upstream should degrade into the base-sha fallback below, not into a hard failure.
+          git fetch --no-tags --quiet origin +refs/heads/master:refs/remotes/origin/master || true
+
+          BASE_SHA="$(git merge-base origin/master HEAD || true)"
+          if [ -z "${BASE_SHA}" ]; then
+            echo "::warning::git merge-base failed, falling back to the PR base sha"
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          fi
+          echo "Patch coverage base: ${BASE_SHA}"
+
+          # Restricted to C/C++ sources: they are the only thing gcov can describe, and it keeps
+          # binary / mode-change hunks away from fastcov's diff parser, which raises
+          # DiffParseError on any hunk line it cannot classify.
+          PATHSPEC=('*.cpp' '*.hpp' '*.cc' '*.c' '*.h' '*.cxx' '*.hh' '*.hxx')
+
+          git diff --no-color --no-ext-diff "${BASE_SHA}" HEAD -- "${PATHSPEC[@]}" \
+            > /workspace/patch.diff
+
+          CHANGED_FILES="$(git diff --name-only "${BASE_SHA}" HEAD -- "${PATHSPEC[@]}" | wc -l)"
+          echo "Changed C/C++ files: ${CHANGED_FILES}"
+          git --no-pager diff --stat "${BASE_SHA}" HEAD -- "${PATHSPEC[@]}"
+
+          echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "changed_files=${CHANGED_FILES}" >> "$GITHUB_OUTPUT"
+          if [ -s /workspace/patch.diff ]; then
+            echo "has_diff=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_diff=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Generate coverage report (fastcov)
         shell: bash
@@ -219,7 +268,48 @@ jobs:
             --lcov \
             --output /workspace/coverage_data/coverage.info
 
+      # `--add-tracefile` re-reads the report produced above instead of invoking gcov again, so the
+      # patch report costs a couple of seconds. `--diff-filter` keeps only files named in the diff
+      # and, inside them, only the added lines (function records are dropped by design).
+      # `--diff-base-dir` is joined onto the diff's `b/` paths, so this has to run while the
+      # `SF:` entries are still absolute - the path normalization happens in the next step.
+      - name: Generate patch coverage report (fastcov --diff-filter)
+        id: patch_report
+        if: github.event_name == 'pull_request' && steps.patch_diff.outputs.has_diff == 'true'
+        shell: bash
+        working-directory: /workspace
+        run: |
+          source /workspace/.venv/bin/activate
+
+          mkdir -p /workspace/patch_coverage_data
+
+          # Named coverage.info because that is the filename gen-coverview-data.py writes into
+          # config.json; the two reports live in separate data directories.
+          fastcov \
+            --add-tracefile /workspace/coverage_data/coverage.info \
+            --diff-filter /workspace/patch.diff \
+            --diff-base-dir /workspace/src/scorpio_utils \
+            --branch-coverage \
+            --lcov \
+            --output /workspace/patch_coverage_data/coverage.info
+
+          # An info file without a single SF: record means the diff added no line that carries
+          # coverage data - e.g. only comments, blank lines or declarations. fastcov keeps added
+          # (`+`) lines only, so that case is expected, not an error.
+          if grep -q '^SF:' /workspace/patch_coverage_data/coverage.info; then
+            echo "has_data=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_data=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Normalize source paths
+        shell: bash
+        working-directory: /workspace
+        run: |
           sed -i 's|/workspace/src/scorpio_utils/||g' /workspace/coverage_data/coverage.info
+          if [ -f /workspace/patch_coverage_data/coverage.info ]; then
+            sed -i 's|/workspace/src/scorpio_utils/||g' /workspace/patch_coverage_data/coverage.info
+          fi
 
       # Runs before the summary so the LF/LH/BRF/BRH totals reflect the filtered set.
       # `info-process transform` edits the file in place and recomputes those counters.
@@ -229,40 +319,62 @@ jobs:
         run: |
           source /workspace/.venv/bin/activate
 
-          # Filter out everything that is inside `test` directory
-          # or is a .cpp file with `test_` prefix
-          info-process transform \
-            --filter-out '(\/|^)test(\/|(_\w+\.cpp))' \
-            /workspace/coverage_data/coverage.info
+          # Filter out everything that is inside `test` directory or is a .cpp file named
+          # `test.cpp` / prefixed with `test_`
+          for info in /workspace/coverage_data/coverage.info /workspace/patch_coverage_data/coverage.info; do
+            if [ -f "${info}" ]; then
+              info-process transform \
+                --filter-out '(\/|^)test(\/|(_\w+)?\.cpp)' \
+                "${info}"
+            fi
+          done
 
       - name: Verify tests excluded from coverage data
         shell: bash
         run: |
-          # Every step in this job runs with `if: always()`, so a failed filter step would
-          # otherwise go on to publish unfiltered data. Fail hard instead.
-          if grep -nE '^SF:([^:]*/)?test(/|_[A-Za-z0-9_]+\.cpp)' /workspace/coverage_data/coverage.info; then
-            echo "::error::test sources still present in coverage.info after filtering"
-            exit 1
-          fi
+          # `info-process transform` exits 0 when its regex matches nothing, so a bad pattern or
+          # a rename that shifts test paths would silently publish coverage padded with test
+          # sources. Fail hard instead.
+          for info in /workspace/coverage_data/coverage.info /workspace/patch_coverage_data/coverage.info; do
+            if [ -f "${info}" ] && grep -nE '^SF:([^:]*/)?test(/|(_[A-Za-z0-9_]+)?\.cpp)' "${info}"; then
+              echo "::error::test sources still present in ${info} after filtering"
+              exit 1
+            fi
+          done
 
       - name: Compute coverage summary
         id: coverage_summary
         shell: bash
         run: |
-          awk -F: '
-            /^LF:/ { lf += $2 }
-            /^LH:/ { lh += $2 }
-            /^BRF:/ { brf += $2 }
-            /^BRH:/ { brh += $2 }
-            END {
-              line_pct = (lf > 0) ? (lh / lf * 100) : 0
-              branch_pct = (brf > 0) ? (brh / brf * 100) : 0
-              printf "line_pct=%.2f\n", line_pct
-              printf "branch_pct=%.2f\n", branch_pct
-              printf "lines=%d/%d\n", lh, lf
-              printf "branches=%d/%d\n", brh, brf
-            }
-          ' /workspace/coverage_data/coverage.info >> "$GITHUB_OUTPUT"
+          # $1 = info file, $2 = output name prefix ("" for the full report, "patch_" for the
+          # diff-filtered one). A patch that adds no instrumented line reports n/a rather than 0%.
+          summarize() {
+            awk -F: -v p="$2" '
+              /^LF:/ { lf += $2 }
+              /^LH:/ { lh += $2 }
+              /^BRF:/ { brf += $2 }
+              /^BRH:/ { brh += $2 }
+              END {
+                if (lf > 0) {
+                  printf "%sline_pct=%.2f\n", p, lh / lf * 100
+                } else {
+                  printf "%sline_pct=n/a\n", p
+                }
+                if (brf > 0) {
+                  printf "%sbranch_pct=%.2f\n", p, brh / brf * 100
+                } else {
+                  printf "%sbranch_pct=n/a\n", p
+                }
+                printf "%slines=%d/%d\n", p, lh, lf
+                printf "%sbranches=%d/%d\n", p, brh, brf
+              }
+            ' "$1" >> "$GITHUB_OUTPUT"
+          }
+
+          summarize /workspace/coverage_data/coverage.info ""
+          if [ -f /workspace/patch_coverage_data/coverage.info ]; then
+            summarize /workspace/patch_coverage_data/coverage.info "patch_"
+          fi
 
       - name: Prepare coverview data
         shell: bash
@@ -276,13 +388,32 @@ jobs:
             --branch "${{ github.ref_name }}" \
             --commit "${{ github.sha }}"
 
+      - name: Prepare patch coverview data
+        if: steps.patch_report.outputs.has_data == 'true'
+        shell: bash
+        working-directory: /workspace
+        env:
+          BASE_SHA: ${{ steps.patch_diff.outputs.base_sha }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          python3 /workspace/src/scorpio_utils/scripts/gen-coverview-data.py \
+            --info /workspace/patch_coverage_data/coverage.info \
+            --repo-root /workspace/src/scorpio_utils \
+            --out-dir /workspace/patch_coverage_data \
+            --repo "${{ github.repository }}" \
+            --title "scorpio_utils repository patch coverage" \
+            --branch "${HEAD_REF} (patch vs ${BASE_SHA:0:8})" \
+            --commit "${{ github.sha }}"
+
       - name: Verify tests excluded from coverview sources
         shell: bash
         run: |
-          if grep -nE '^### FILE: ([^ ]*/)?test/' /workspace/coverage_data/sources.txt; then
-            echo "::error::test sources still present in sources.txt"
-            exit 1
-          fi
+          for sources in /workspace/coverage_data/sources.txt /workspace/patch_coverage_data/sources.txt; do
+            if [ -f "${sources}" ] && grep -nE '^### FILE: ([^ ]*/)?test/' "${sources}"; then
+              echo "::error::test sources still present in ${sources}"
+              exit 1
+            fi
+          done
 
       - name: Fetch coverview source
         shell: bash
@@ -303,10 +434,9 @@ jobs:
 
       - name: Setup Node
         if: steps.cache-coverview-dist.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-          apt-get install -y nodejs
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
 
       - name: Build coverview
         id: build-coverview
@@ -330,51 +460,143 @@ jobs:
         shell: bash
         working-directory: /tmp/coverview
         run: |
-          # `embed.py` injects by a plain string replace and silently does nothing when the
-          # placeholder is missing, which would publish a stale report. Fail instead.
-          if ! grep -q 'let originalFiles = {}' dist/index.html; then
-            echo "::error::dist/index.html has no embed placeholder - coverview dist is not pristine (stale cache?)"
-            exit 1
+          # `embed.py` only ever writes `dist/index.html`, so each site is built from its own copy
+          # of the pristine dist.
+          cp -a dist /tmp/coverview/dist-pristine
+
+          # $1 = coverview data directory, $2 = destination directory for the finished site
+          embed_site() {
+            rm -rf dist
+            cp -a /tmp/coverview/dist-pristine dist
+
+            # `embed.py` injects by a plain string replace and silently does nothing when the
+            # placeholder is missing, which would publish a stale report. Fail instead.
+            if ! grep -q 'let originalFiles = {}' dist/index.html; then
+              echo "::error::dist/index.html has no embed placeholder - coverview dist is not pristine (stale cache?)"
+              exit 1
+            fi
+
+            python3 embed.py --inject-data "$1"
+
+            rm -rf dist/assets dist/index.html.bak
+            rm -rf "$2"
+            mv dist "$2"
+          }
+
+          embed_site /workspace/coverage_data /tmp/coverview/site-full
+          if [ -f /workspace/patch_coverage_data/config.json ]; then
+            embed_site /workspace/patch_coverage_data /tmp/coverview/site-patch
           fi
 
-          python3 embed.py --inject-data /workspace/coverage_data
-
-          rm -rf dist/assets dist/index.html.bak
-
       - name: Upload coverage data artifact
+        id: upload_data
         uses: actions/upload-artifact@v4
         with:
           name: coverage-data
-          path: /workspace/coverage_data
+          # Least common ancestor is /workspace, so the artifact keeps the directory layout.
+          path: |
+            /workspace/coverage_data
+            /workspace/patch_coverage_data
+            /workspace/patch.diff
           retention-days: 14
 
       - name: Upload coverview site artifact
+        id: upload_site
         uses: actions/upload-artifact@v4
         with:
           name: coverview-site
-          path: /tmp/coverview/dist
+          path: /tmp/coverview/site-full
+          retention-days: 14
+
+      - name: Upload patch coverview site artifact
+        id: upload_patch_site
+        if: steps.patch_report.outputs.has_data == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverview-site-patch
+          path: /tmp/coverview/site-patch
           retention-days: 14
 
       - name: Upload coverage report as Pages artifact
         if: ${{ env.DEPLOY == 'true' }}
         uses: actions/upload-pages-artifact@v3
         with:
-          path: /tmp/coverview/dist
+          path: /tmp/coverview/site-full
 
       - name: Comment coverage summary on PR
         if: github.event_name == 'pull_request'
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          header: coverage
-          message: |
-            ### Coverage report
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          LINE_PCT: ${{ steps.coverage_summary.outputs.line_pct }}
+          # Not LINES: bash's checkwinsize clobbers that name with the terminal height (0
+          # under a runner, which is how this row used to render as `(0)`).
+          LINE_COUNTS: ${{ steps.coverage_summary.outputs.lines }}
+          BRANCH_PCT: ${{ steps.coverage_summary.outputs.branch_pct }}
+          BRANCH_COUNTS: ${{ steps.coverage_summary.outputs.branches }}
+          PATCH_LINE_PCT: ${{ steps.coverage_summary.outputs.patch_line_pct }}
+          PATCH_LINE_COUNTS: ${{ steps.coverage_summary.outputs.patch_lines }}
+          PATCH_BRANCH_PCT: ${{ steps.coverage_summary.outputs.patch_branch_pct }}
+          PATCH_BRANCH_COUNTS: ${{ steps.coverage_summary.outputs.patch_branches }}
+          PATCH_HAS_DATA: ${{ steps.patch_report.outputs.has_data }}
+          PATCH_HAS_DIFF: ${{ steps.patch_diff.outputs.has_diff }}
+          PATCH_FILES: ${{ steps.patch_diff.outputs.changed_files }}
+          BASE_SHA: ${{ steps.patch_diff.outputs.base_sha }}
+          DATA_URL: ${{ steps.upload_data.outputs.artifact-url }}
+          SITE_URL: ${{ steps.upload_site.outputs.artifact-url }}
+          PATCH_SITE_URL: ${{ steps.upload_patch_site.outputs.artifact-url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Posts a new comment every run (no upsert / no sticky header) so each push leaves
+          # a fresh entry in the PR thread. python3 does the JSON escaping so the markdown
+          # body cannot break the request.
+          cell() {  # $1 = percentage or "n/a", $2 = hit/total counts
+            if [ "$1" = "n/a" ] || [ -z "$1" ]; then
+              printf 'n/a'
+            else
+              printf '%s%% (%s)' "$1" "$2"
+            fi
+          }
 
-            | Metric | Coverage |
-            | --- | --- |
-            | Lines | ${{ steps.coverage_summary.outputs.line_pct }}% (${{ steps.coverage_summary.outputs.lines }}) |
-            | Branches | ${{ steps.coverage_summary.outputs.branch_pct }}% (${{ steps.coverage_summary.outputs.branches }}) |
+          FULL_ROW="| Full tree | $(cell "${LINE_PCT}" "${LINE_COUNTS}") | $(cell "${BRANCH_PCT}" "${BRANCH_COUNTS}") |"
 
-            Full report artifacts (`coverage-data`, `coverview-site`): ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          if [ "${PATCH_HAS_DATA}" = "true" ]; then
+            PATCH_ROW="| Patch (vs \`${BASE_SHA:0:8}\`) | $(cell "${PATCH_LINE_PCT}" "${PATCH_LINE_COUNTS}") | $(cell "${PATCH_BRANCH_PCT}" "${PATCH_BRANCH_COUNTS}") |"
+            PATCH_LINK="- Patch report (\`coverview-site-patch\`): ${PATCH_SITE_URL}"
+          elif [ "${PATCH_HAS_DIFF}" = "true" ]; then
+            # The diff reached fastcov but none of its added lines carries a coverage record:
+            # comments, blank lines, declarations, or code in a file nothing links into a test.
+            PATCH_ROW="| Patch (vs \`${BASE_SHA:0:8}\`) | no added instrumented lines in ${PATCH_FILES} changed file(s) | n/a |"
+            PATCH_LINK="- Patch report: not generated - the ${PATCH_FILES} changed C/C++ file(s) add no instrumented line (comments, blank lines or declarations only)"
+          else
+            PATCH_ROW="| Patch (vs \`${BASE_SHA:0:8}\`) | no C/C++ files changed | n/a |"
+            PATCH_LINK="- Patch report: not generated - no C/C++ files changed"
+          fi
+
+          BODY=$(cat <<EOF
+          ### Coverage report
+
+          | Report | Lines | Branches |
+          | --- | --- | --- |
+          ${FULL_ROW}
+          ${PATCH_ROW}
+
+          - Full report (\`coverview-site\`): ${SITE_URL}
+          ${PATCH_LINK}
+          - Raw data (\`coverage-data\`): ${DATA_URL}
+          - Workflow run: ${RUN_URL}
+          EOF
+          )
+          export BODY
+          python3 -c 'import json, os, sys; sys.stdout.write(json.dumps({"body": os.environ["BODY"]}))' \
+            | curl -fsSL -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                --data-binary @- \
+                "https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/comments"
 
   deploy:
     if: ${{ github.ref == 'refs/heads/master' && github.event_name != 'pull_request' }}
