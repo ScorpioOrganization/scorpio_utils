@@ -17,9 +17,15 @@
  */
 
 #include <gtest/gtest.h>
+#include <cstdlib>
+#include <ctime>
 #include "scorpio_utils/time_utils/time_string.hpp"
 
 TEST(TimeString, BasicUsage) {
+  // time_string formats local time: pin the zone (Central European, as a POSIX rule so no tz database is needed)
+  // so the result does not depend on the machine running the test
+  setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
+  tzset();
   int64_t nanoseconds = 1753037204189000000;
   std::string formatted_time = scorpio_utils::time_utils::time_string(nanoseconds);
   EXPECT_EQ(formatted_time, "2025-07-20_20:46:44");
