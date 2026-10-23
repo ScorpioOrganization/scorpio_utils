@@ -603,6 +603,13 @@ void ScorpioUdp::handle_disconnect_packet(const MessageHeader& header, const Udp
           connection_opt->panic_soft("Peer reports this connection as disconnected (peer restarted?)");
         }
       } break;
+    case Code::DisconnectSubCommands::ACCEPTED:
+      [[fallthrough]];
+    case Code::DisconnectSubCommands::REJECTED: {
+        // The peer's reply to our DISCONNECT, the local connection is already closed
+        SCU_LOG_DEBUG(_logger, "Received DISCONNECT reply {} from {}:{}",
+          udp_data.data[header.data_offset], udp_data.ip.str(), udp_data.port);
+      } break;
     default: {
         // TODO(@Igor): Handle error properly
         SCU_LOG_WARNING(_logger, "Received unknown/unexpected DISCONNECT subcommand: {} from {}:{}",
