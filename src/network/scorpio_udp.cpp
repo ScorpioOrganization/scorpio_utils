@@ -167,6 +167,7 @@ ScorpioUdp::ScorpioUdp(
   _received_bytes(0),
   _send_bytes(0),
   _auto_accept(false),
+  _auto_accept_streams(false),
   _stop(true),
   _logger(logger),
   _panic(false),
@@ -454,6 +455,8 @@ void ScorpioUdp::handle_connect_packet(const MessageHeader& header, const UdpDat
         } else if (_auto_accept.load(std::memory_order_relaxed)) {
           std::shared_ptr<ScorpioUdpConnection> new_connection(new ScorpioUdpConnection(
                       udp_data.ip, udp_data.port, connection_id, false, shared_from_this()));
+          // Before ACCEPTED goes out: the peer may create streams right after receiving it
+          new_connection->set_auto_accept_stream(_auto_accept_streams.load(std::memory_order_relaxed));
           new_connection->_start_signal.notify(100000);
           new_connection->_state.store(ScorpioUdpConnection::State::CONNECTING);
           _connections.insert({ { udp_data.ip, udp_data.port }, new_connection });
@@ -846,6 +849,7 @@ std::shared_ptr<ScorpioUdpConnection> ScorpioUdp::connect(
   Port port) {
   std::shared_ptr<ScorpioUdpConnection> connection(new ScorpioUdpConnection(ip, port, get_random_number(), true,
     shared_from_this()));
+  connection->set_auto_accept_stream(_auto_accept_streams.load(std::memory_order_relaxed));
   connection->_start_signal.notify(100000);
   _awaiting_connections_channel.send<true>(connection);
   return connection;

@@ -118,6 +118,67 @@ TEST(ScorpioUdp, BasicSend) {
   }
 }
 
+// Waits until the connection or the stream leaves its initial/handshake state
+template<typename Pred>
+bool wait_for(Pred&& done, std::chrono::milliseconds timeout = std::chrono::milliseconds(2000)) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (!done() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return done();
+}
+
+bool creation_finished(const std::shared_ptr<ScorpioUdpStream>& stream) {
+  const auto state = stream->state();
+  return state != ScorpioUdpStream::State::NEW && state != ScorpioUdpStream::State::CREATING;
+}
+
+bool connected(const std::shared_ptr<ScorpioUdpConnection>& connection) {
+  return connection->state() == ScorpioUdpConnection::State::CONNECTED;
+}
+
+TEST(ScorpioUdp, AutoAcceptStreamsAppliesToNewConnectionsBeforeTheyAreHandedOut) {
+  const auto port = PORT;
+  auto server = create_server(port);
+  auto client = create_client();
+  ASSERT_TRUE(server);
+  ASSERT_TRUE(client);
+  EXPECT_FALSE(server->set_auto_accept_streams(true));
+  EXPECT_TRUE(server->is_auto_accept_streams());
+  std::ignore = client->set_auto_accept_streams(true);
+
+  // The client creates a stream the moment it is connected, while nobody has touched the accepted connection
+  auto client_connection = client->connect(localhost, port);
+  ASSERT_TRUE(client_connection);
+  EXPECT_TRUE(client_connection->is_auto_accept_stream());
+  ASSERT_TRUE(wait_for([&] { return connected(client_connection); }));
+  auto stream = client_connection->create_stream(1, { 0, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED });
+  ASSERT_TRUE(stream);
+  ASSERT_TRUE(wait_for([&] { return creation_finished(stream); }));
+  EXPECT_EQ(stream->state(), ScorpioUdpStream::State::CREATED);
+
+  auto server_connection = server->get_accepted_connection();
+  ASSERT_TRUE(server_connection.has_value());
+  EXPECT_TRUE(server_connection.value()->is_auto_accept_stream());
+  EXPECT_TRUE(server_connection.value()->get_accepted_stream().has_value());
+}
+
+TEST(ScorpioUdp, StreamsAreRejectedUntilAccepted) {
+  const auto port = PORT;
+  auto server = create_server(port);
+  auto client = create_client();
+  ASSERT_TRUE(server);
+  ASSERT_TRUE(client);
+
+  auto client_connection = client->connect(localhost, port);
+  ASSERT_TRUE(client_connection);
+  ASSERT_TRUE(wait_for([&] { return connected(client_connection); }));
+  auto stream = client_connection->create_stream(1, { 0, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED });
+  ASSERT_TRUE(stream);
+  ASSERT_TRUE(wait_for([&] { return creation_finished(stream); }));
+  EXPECT_EQ(stream->state(), ScorpioUdpStream::State::REJECTED);
+}
+
 TEST(ScorpioUdp, ClientServerCreation) {
   EXPECT_TRUE(create_server(PORT));
   EXPECT_TRUE(create_client());

@@ -632,6 +632,7 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   std::atomic<uint64_t> _received_bytes;
   std::atomic<uint64_t> _send_bytes;
   std::atomic<bool> _auto_accept;
+  std::atomic<bool> _auto_accept_streams;
   std::atomic<bool> _stop;
   threading::Signal _start_signal;
   std::shared_ptr<logger::Logger> _logger;
@@ -769,6 +770,19 @@ public:
 
   SCU_ALWAYS_INLINE auto set_auto_accept(bool auto_accept) noexcept {
     return _auto_accept.exchange(auto_accept, std::memory_order_relaxed);
+  }
+
+  SCU_ALWAYS_INLINE auto is_auto_accept_streams() const noexcept {
+    return _auto_accept_streams.load(std::memory_order_relaxed);
+  }
+
+  /**
+   * Sets the initial `set_auto_accept_stream()` value of the connections created from now on (accepted and dialed).
+   * Setting it on a connection after it is handed out leaves a window in which the peer, already connected,
+   * gets its CREATE_STREAM rejected.
+   */
+  SCU_ALWAYS_INLINE auto set_auto_accept_streams(bool auto_accept) noexcept {
+    return _auto_accept_streams.exchange(auto_accept, std::memory_order_relaxed);
   }
 
   template<bool Wait = false>
