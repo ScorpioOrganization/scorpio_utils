@@ -42,3 +42,16 @@ TEST(LazyTimeProvider, BasicUsage) {
   EXPECT_LT((next_time - time) % time_provider.get_time_offset(), base_offset);
   EXPECT_GT(next_time - time, base_offset);
 }
+
+TEST(LazyTimeProvider, MonotonicClock) {
+  const int64_t offset = 10'000'000;
+  scorpio_utils::time_provider::LazyTimeProvider time_provider(
+    offset, scorpio_utils::time_provider::LazyTimeProvider::Clock::MONOTONIC);
+  const auto steady_now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
+  auto time = time_provider.get_time();
+  EXPECT_LE(steady_now - time, offset) << "Follows steady_clock, not the wall clock";
+  EXPECT_GE(steady_now - time, 0);
+  std::this_thread::sleep_for(std::chrono::nanoseconds(offset * 3));
+  EXPECT_GT(time_provider.get_time(), time);
+}

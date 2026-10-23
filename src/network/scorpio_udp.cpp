@@ -130,7 +130,12 @@ std::shared_ptr<TimeProvider> ScorpioUdp::get_time_provider() {
   if (auto provider = weak_provider.lock()) {
     return provider;
   }
+#ifdef SCU_UDP_MOCK
   auto provider = std::make_shared<TimeProvider>();
+#else
+  // Heartbeats and timeouts measure durations: a step of the system time must not fake or delay them
+  auto provider = std::make_shared<TimeProvider>(100'000'000, TimeProvider::Clock::MONOTONIC);
+#endif
   weak_provider = provider;
   return provider;
 }

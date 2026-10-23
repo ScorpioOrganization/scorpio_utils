@@ -19,6 +19,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <thread>
 
 #include "scorpio_utils/decorators.hpp"
@@ -34,21 +35,34 @@ namespace scorpio_utils::time_provider {
  * The time is updated every `offset` nanoseconds, which can be configured during construction
  * or using `set_time_offset`.
  * The default offset is 100 milliseconds (100,000,000 nanoseconds).
+ *
+ * By default it follows the wall clock (`system_clock`). Measuring durations and timeouts should use
+ * `Clock::MONOTONIC` (`steady_clock`), which never jumps when the system time is set (e.g. by NTP at boot).
  */
 class alignas (SCU_HARDWARE_DESTRUCTIVE_INTERFERENCE_SIZE) LazyTimeProvider : public TimeProvider {
+public:
+  enum class Clock : uint8_t {
+    WALL,
+    MONOTONIC,
+  };
+
+private:
+  const Clock _clock;
   std::atomic<int64_t> _time;
   std::atomic<int64_t> _time_offset;
   std::atomic<bool> _running;
   std::thread _thread;
 
   void thread_worker();
+  int64_t now() const noexcept;
 
 public:
   /**
    * Creates a new LazyTimeProvider instance.
    * \param offset Time offset in nanoseconds. Default is 100 milliseconds.
+   * \param clock The clock to follow. Default is the wall clock.
    */
-  explicit LazyTimeProvider(const int64_t offset = 100'000'000);
+  explicit LazyTimeProvider(const int64_t offset = 100'000'000, const Clock clock = Clock::WALL);
 
   ~LazyTimeProvider() override;
 
