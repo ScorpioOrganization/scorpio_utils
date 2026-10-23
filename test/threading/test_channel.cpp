@@ -18,6 +18,8 @@
 
 #include <gtest/gtest.h>
 #include <atomic>
+#include <chrono>
+#include <memory>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -300,4 +302,178 @@ TEST(Channel, SplitChannel) {
   if (receiver.joinable()) {
     receiver.join();
   }
+}
+
+static_assert(!std::is_trivially_destructible_v<scorpio_utils::threading::Channel<int, 0>>);
+
+TEST(UnboundedChannel, NeverFull) {
+  scorpio_utils::threading::Channel<int, 0> channel;
+  EXPECT_EQ(channel.size(), 0) << "Size 0 means unlimited";
+  EXPECT_TRUE(channel.is_empty());
+  EXPECT_TRUE(channel.is_write_ready());
+  EXPECT_FALSE(channel.is_full());
+
+  constexpr int kItems = 100000;
+  for (int i = 0; i < kItems; ++i) {
+    ASSERT_FALSE(channel.send(i)) << "Send " << i;
+  }
+  EXPECT_FALSE(channel.is_full());
+  EXPECT_TRUE(channel.is_write_ready());
+  EXPECT_EQ(channel.available(), kItems);
+  for (int i = 0; i < kItems; ++i) {
+    auto value = channel.receive();
+    ASSERT_TRUE(value.has_value());
+    ASSERT_EQ(value.value(), i) << "Items come out in the order they were sent";
+  }
+  EXPECT_FALSE(channel.receive().has_value());
+  EXPECT_TRUE(channel.is_empty());
+}
+
+TEST(UnboundedChannel, MultipleProducersAndConsumers) {
+  constexpr int kProducers = 4;
+  constexpr int kConsumers = 4;
+  constexpr int kItemsPerProducer = 20000;
+  constexpr int kTotal = kProducers * kItemsPerProducer;
+  scorpio_utils::threading::Channel<std::pair<int, int>, 0> channel;
+  std::atomic<int> received(0);
+  std::vector<std::atomic<int>> seen(static_cast<size_t>(kTotal));
+  std::atomic<bool> out_of_order(false);
+
+  std::vector<std::thread> threads;
+  for (int c = 0; c < kConsumers; ++c) {
+    threads.emplace_back([&]() {
+        std::vector<int> last(kProducers, -1);
+        while (received.load() < kTotal) {
+          auto item = channel.receive();
+          if (!item.has_value()) {
+            std::this_thread::yield();
+            continue;
+          }
+          const auto [producer, sequence] = *item;
+          // FIFO: what one consumer gets from one producer is in the order it was sent
+          if (sequence <= last[static_cast<size_t>(producer)]) {
+            out_of_order.store(true);
+          }
+          last[static_cast<size_t>(producer)] = sequence;
+          seen[static_cast<size_t>(producer * kItemsPerProducer + sequence)].fetch_add(1);
+          received.fetch_add(1);
+        }
+      });
+  }
+  for (int p = 0; p < kProducers; ++p) {
+    threads.emplace_back([&channel, p]() {
+        for (int i = 0; i < kItemsPerProducer; ++i) {
+          channel.send<true>(std::make_pair(p, i));
+        }
+      });
+  }
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  EXPECT_EQ(received.load(), kTotal);
+  EXPECT_FALSE(out_of_order.load());
+  for (size_t i = 0; i < seen.size(); ++i) {
+    ASSERT_EQ(seen[i].load(), 1) << "Item " << i << " must be received exactly once";
+  }
+  EXPECT_TRUE(channel.is_empty());
+}
+
+TEST(UnboundedChannel, BlockingReceiveIsWokenBySend) {
+  scorpio_utils::threading::Channel<int, 0> channel;
+  std::thread receiver([&channel]() {
+      EXPECT_EQ(channel.receive<true>(), 7);
+    });
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  channel.send<true>(7);
+  receiver.join();
+}
+
+TEST(UnboundedChannel, CloseChannel) {
+  scorpio_utils::threading::Channel<int, 0> channel;
+  EXPECT_FALSE(channel.send(1));
+
+  std::thread receiver([&channel]() {
+      // The item sent before is still there, then the blocked receive is woken by close()
+      EXPECT_EQ(channel.receive<true>(), 1);
+      EXPECT_THROW(channel.receive<true>(), scorpio_utils::threading::ClosedChannelException);
+    });
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  channel.close();
+  receiver.join();
+  EXPECT_FALSE(channel.is_write_ready());
+  EXPECT_THROW(channel.send<false>(1), scorpio_utils::threading::ClosedChannelException);
+  EXPECT_THROW(channel.send<true>(1), scorpio_utils::threading::ClosedChannelException);
+  EXPECT_THROW(channel.receive<false>(), scorpio_utils::threading::ClosedChannelException);
+  EXPECT_THROW(channel.receive<true>(), scorpio_utils::threading::ClosedChannelException);
+}
+
+TEST(UnboundedChannel, CopyOnlyType) {
+  class CopyOnly {
+    int value;
+
+public:
+    explicit CopyOnly(int v)
+    : value(v) { }
+    CopyOnly(const CopyOnly&) = default;
+    CopyOnly& operator=(const CopyOnly&) = default;
+    CopyOnly(CopyOnly&&) = delete;
+    CopyOnly& operator=(CopyOnly&&) = delete;
+    auto get_value() const {
+      return value;
+    }
+  };
+
+  scorpio_utils::threading::Channel<CopyOnly, 0> channel;
+  CopyOnly item(3);
+  EXPECT_FALSE(channel.send(item));
+  auto received_item = channel.receive();
+  ASSERT_TRUE(received_item.has_value());
+  EXPECT_EQ(received_item->get_value(), 3);
+}
+
+TEST(UnboundedChannel, MoveOnlyType) {
+  scorpio_utils::threading::Channel<std::unique_ptr<int>, 0> channel;
+  auto item = std::make_unique<int>(42);
+  EXPECT_FALSE(channel.send(std::move(item)));
+  EXPECT_FALSE(item) << "Item should be moved";
+  EXPECT_EQ(channel.available(), 1);
+  auto received_item = channel.receive<true>();
+  ASSERT_TRUE(received_item);
+  EXPECT_EQ(*received_item, 42);
+}
+
+TEST(UnboundedChannel, LifetimeCheck) {
+  scorpio_utils::threading::Channel<scorpio_utils::testing::LifetimeHelper, 0> channel;
+  scorpio_utils::testing::LifetimeHelper item;
+  EXPECT_FALSE(channel.send(std::move(item)));
+  auto received_item = channel.receive();
+  ASSERT_TRUE(received_item.has_value());
+  EXPECT_EQ(item.get_copy_count(), 0) << "Item should not be copied";
+  EXPECT_EQ(item.get_move_count(), 1) << "Item should be moved once";
+}
+
+TEST(UnboundedChannel, ItemsLeftInTheChannelAreDestroyed) {
+  auto shared = std::make_shared<int>(5);
+  {
+    scorpio_utils::threading::Channel<std::shared_ptr<int>, 0> channel;
+    for (int i = 0; i < 3; ++i) {
+      EXPECT_FALSE(channel.send(shared));
+    }
+    EXPECT_EQ(shared.use_count(), 4);
+  }
+  EXPECT_EQ(shared.use_count(), 1);
+}
+
+TEST(UnboundedChannel, SplitChannel) {
+  auto channel = std::make_shared<scorpio_utils::threading::Channel<int, 0>>();
+  auto [writer, reader] = scorpio_utils::threading::split_channel(channel);
+  EXPECT_EQ(writer.size(), 0);
+  EXPECT_FALSE(reader.is_full());
+
+  std::thread receiver([&reader]() {
+      EXPECT_EQ(reader.receive<true>(), 42);
+    });
+  writer.send<true>(42);
+  receiver.join();
 }

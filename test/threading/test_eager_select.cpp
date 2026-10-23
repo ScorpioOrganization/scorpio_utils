@@ -21,7 +21,9 @@
 #include <chrono>
 #include <memory>
 #include <thread>
+#include <variant>
 #include <vector>
+#include "scorpio_utils/threading/channel.hpp"
 #include "scorpio_utils/threading/eager_select.hpp"
 #include "scorpio_utils/threading/signal.hpp"
 #include "scorpio_utils/threading/jthread.hpp"
@@ -1153,4 +1155,18 @@ TEST(EagerSelect, ComplexScenarioWithTimeoutAndSignals) {
   std::this_thread::sleep_for(std::chrono::milliseconds(60));
 
   EXPECT_EQ(selected_index.load(), 2);  // Timeout should trigger
+}
+
+TEST(EagerSelect, UnboundedChannel) {
+  scorpio_utils::threading::Channel<int, 0> channel;
+  Signal signal;
+  std::thread sender([&channel]() {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      channel.send(11);
+    });
+  auto result = eager_select(channel, signal);
+  sender.join();
+  ASSERT_EQ(result.index(), 0U);
+  EXPECT_EQ(std::get<0>(result), 11);
+  EXPECT_TRUE(channel.is_empty());
 }
