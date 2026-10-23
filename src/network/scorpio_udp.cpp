@@ -1,5 +1,6 @@
 #include "scorpio_utils/network/scorpio_udp.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <exception>
@@ -12,6 +13,7 @@
 #include "scorpio_utils/misc.hpp"
 #include "scorpio_utils/network/types.hpp"
 #include "scorpio_utils/sat_math.hpp"
+#include "scorpio_utils/threading/thread_name.hpp"
 
 /**
  * Possible optimizations:
@@ -310,6 +312,7 @@ SCU_NORETURN SCU_COLD void ScorpioUdp::panic(std::string&& message) {
 }
 
 void ScorpioUdp::receiver_thread() {
+  threading::set_current_thread_name("sudp_recv");
   try {
     while (SCU_LIKELY(!_stop.load(std::memory_order_relaxed))) {
       std::vector<uint8_t> data(SCU_UDP_MAX_PACKET_SIZE);
@@ -336,6 +339,9 @@ void ScorpioUdp::receiver_thread() {
 }
 
 void ScorpioUdp::sender_thread() {
+  threading::set_current_thread_name("sudp_send");
+  constexpr size_t busy_sleep = 10'000;  // 10 us while there is traffic, backing off up to SCU_UDP_IDLE_MAX_SLEEP
+  size_t sleep = busy_sleep;
   try {
     while (SCU_LIKELY(!_stop.load(std::memory_order_relaxed))) {
       // Strict priority: control packets (heartbeats, handshakes) always go out
@@ -345,9 +351,11 @@ void ScorpioUdp::sender_thread() {
         msg_opt = _sender_channel.receive();
       }
       if (!msg_opt.has_value()) {
-        std::this_thread::sleep_for(std::chrono::microseconds(10));
+        std::this_thread::sleep_for(std::chrono::nanoseconds(sleep));
+        sleep = std::min<size_t>(sleep * 2, SCU_UDP_IDLE_MAX_SLEEP);
         continue;
       }
+      sleep = busy_sleep;
       auto& msg = *msg_opt;
       SCU_ASSERT(msg.data.size() <= SCU_UDP_MAX_PACKET_SIZE,
         "UDP message size is too large (" << msg.data.size()
@@ -372,6 +380,7 @@ void ScorpioUdp::sender_thread() {
 }
 
 void ScorpioUdp::processing_thread() {
+  threading::set_current_thread_name("sudp_proc");
   try {
     _start_signal.wait();
     const auto self_weak = weak_from_this();
@@ -387,7 +396,8 @@ void ScorpioUdp::processing_thread() {
           pull_awaiting_connections(connection);
         },
         [] (Empty) SCU_ALWAYS_INLINE_RAW { /* Timeout */ },
-      }, threading::eager_select(_receiver_channel, _awaiting_connections_channel, timeout.start()));
+      }, threading::eager_select<10'000, SCU_UDP_IDLE_MAX_SLEEP>(
+        _receiver_channel, _awaiting_connections_channel, timeout.start()));
     }
   } catch (const PanicException&) {
   } catch (const threading::ClosedChannelException&) {
@@ -1537,6 +1547,7 @@ void ScorpioUdpConnection::send_heartbeat() {
 }
 
 void ScorpioUdpConnection::processing_thread() {
+  threading::set_current_thread_name("sudp_conn");
   std::weak_ptr<ScorpioUdpConnection> self_weak;
   std::shared_ptr<ScorpioUdpConnection> self;
   // On every exit path: if the connection died abnormally (panic or rejection),
@@ -1619,7 +1630,7 @@ void ScorpioUdpConnection::processing_thread() {
           pull_awaiting_streams(std::move(stream));
         },
         [] (Empty) SCU_ALWAYS_INLINE_RAW { /* Timeout */ },
-      }, threading::eager_select(_incoming_packets, _awaiting_streams, timeout));
+      }, threading::eager_select<10'000, SCU_UDP_IDLE_MAX_SLEEP>(_incoming_packets, _awaiting_streams, timeout));
       if (timeout.is_elapsed()) {
         send_heartbeat();
         timeout.reset();

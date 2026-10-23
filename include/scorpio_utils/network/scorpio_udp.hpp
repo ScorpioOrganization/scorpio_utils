@@ -47,6 +47,11 @@
 #define SCU_UDP_HEARTBEAT_PERIOD (50'000'000)
 #define SCU_UDP_TIMEOUT (5'000'000'000)
 #define SCU_UDP_CREATE_RETRY_PERIOD (5'000'000'000)
+// The ScorpioUdp threads poll every 10 us while there is traffic and back off up to this sleep while idle, so a
+// packet arriving after an idle period waits up to this long per thread
+#ifndef SCU_UDP_IDLE_MAX_SLEEP
+#define SCU_UDP_IDLE_MAX_SLEEP (1'000'000)  // 1 millisecond
+#endif
 // Minimum time between retransmissions of the same packet. Without it a packet in
 // flight longer than one heartbeat period would be resent on every heartbeat,
 // amplifying congestion into a retransmission storm.
