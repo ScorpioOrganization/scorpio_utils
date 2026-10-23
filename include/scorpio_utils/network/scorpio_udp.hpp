@@ -245,7 +245,8 @@ public:
 
 private:
   friend class ScorpioUdpConnection;
-  threading::Channel<std::vector<uint8_t>, 1024 * 1024> _receive;
+  // Unbounded: memory follows the backlog and delivering never blocks the connection processing thread
+  threading::Channel<std::vector<uint8_t>, 0> _receive;
   const StreamNumber _stream_number;
   const StreamEpoch _stream_epoch;
   const StreamQoS _stream_qos;
@@ -452,7 +453,8 @@ private:
   uint16_t _next_stream_to_heartbeat;
   std::mutex _close_mutex;
   threading::Channel<std::shared_ptr<ScorpioUdpStream>, 1024> _new_streams;
-  threading::Channel<std::pair<MessageHeader, UdpData>, 1024 * 1024> _incoming_packets;
+  // Unbounded: memory follows the backlog and the receiving thread never blocks on a busy connection
+  threading::Channel<std::pair<MessageHeader, UdpData>, 0> _incoming_packets;
   threading::Channel<std::shared_ptr<ScorpioUdpStream>, 1024> _awaiting_streams;
   constexpr static size_t max_streams_count = std::numeric_limits<StreamNumber>::max() + 1;
   // The fact that there is a second level of stream mask makes stream removal impossible

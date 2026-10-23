@@ -14,7 +14,7 @@
 namespace scorpio_utils::logger {
 template<typename OS>
 class OSLogger : public Logger {
-  scorpio_utils::threading::Channel<std::pair<Logger::Level, std::string>, 1024 * 1024> _log_channel;
+  scorpio_utils::threading::Channel<std::pair<Logger::Level, std::string>, 0> _log_channel;
   OS _target;
   std::atomic<bool> _stop;
   std::thread _log_thread;
