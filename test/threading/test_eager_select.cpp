@@ -1170,3 +1170,48 @@ TEST(EagerSelect, UnboundedChannel) {
   EXPECT_EQ(std::get<0>(result), 11);
   EXPECT_TRUE(channel.is_empty());
 }
+
+// Counts how often eager_select checks it
+struct CountingSignal {
+  std::atomic<bool> ready{ false };
+  std::atomic<int> checks{ 0 };
+
+  bool SCU_EAGER_SELECT_IS_READY() {
+    ++checks;
+    return ready.load();
+  }
+
+  int SCU_EAGER_SELECT_GET_VALUE() {
+    return 1;
+  }
+};
+
+TEST(EagerSelect, FixedSleepWithoutMaxSleep) {
+  CountingSignal signal;
+  JThread selector([&]() { eager_select<10'000>(signal); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  signal.ready = true;
+  selector.join();
+  // 10 us sleeps (in practice ~60 us with the kernel's timer slack): far more than the backed off version
+  EXPECT_GT(signal.checks.load(), 300);
+}
+
+TEST(EagerSelect, BacksOffWhileIdleUpToMaxSleep) {
+  CountingSignal signal;
+  std::atomic<int64_t> returned_after_us{ -1 };
+  std::chrono::steady_clock::time_point set_at;
+  JThread selector([&]() {
+      eager_select<10'000, 2'000'000>(signal);
+      returned_after_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - set_at).count();
+    });
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  set_at = std::chrono::steady_clock::now();
+  signal.ready = true;
+  selector.join();
+  // 100 ms idle: a few doublings up to 2 ms, then ~50 checks of 2 ms
+  EXPECT_LT(signal.checks.load(), 120);
+  // A signal is still noticed within MaxSleep (plus scheduling margin)
+  EXPECT_GE(returned_after_us.load(), 0);
+  EXPECT_LT(returned_after_us.load(), 15'000);
+}

@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <optional>
@@ -171,6 +172,9 @@ bool _eager_select_predicate(
  * It will return the index of the signal that was notified or closed.
  *
  * \tparam Sleep The sleep duration in nanoseconds between checks. Default is 10000 (10 microseconds).
+ * \tparam MaxSleep While nothing is ready the sleep doubles after every check, from `Sleep` up to `MaxSleep`
+ *                  (nanoseconds). Default is `Sleep`, a fixed sleep. A longer `MaxSleep` saves CPU while idle at the
+ *                  cost of noticing a signal up to `MaxSleep` later; every call starts again at `Sleep`.
  * \tparam Signals The types of the signals to wait on. All types must be derived from `Signal`.
  * \param signals The signals to wait on.
  * \return The index of the signal that was notified or closed.
@@ -180,7 +184,7 @@ bool _eager_select_predicate(
  *          If you need to wait for a large number of signals, consider using a different approach.
  * \note This function will be improved in the future to use a more efficient mechanism.
  */
-template<size_t Sleep = 10000, typename ... Signals>
+template<size_t Sleep = 10000, size_t MaxSleep = Sleep, typename ... Signals>
 std::conditional_t<sizeof...(Signals) == 1,
   std::tuple_element_t<0, std::tuple<typename EagerSelectTraitHelperExtended<Signals>::return_type...>>,
   std::variant<typename EagerSelectTraitHelperExtended<Signals>::return_type...>>
@@ -193,7 +197,13 @@ eager_select(
   static_assert(
     (EagerSelectTraitCheckExtended<Signals>::get_value_invocable && ...),
     "All types must have SCU_EAGER_SELECT_GET_VALUE() method invocable");
-  using ReturnType = decltype(eager_select<Sleep, Signals...>(signals ...));
+  static_assert(MaxSleep >= Sleep, "MaxSleep must not be shorter than Sleep");
+  using ReturnType = decltype(eager_select<Sleep, MaxSleep, Signals...>(signals ...));
+  size_t sleep = Sleep;
+  const auto back_off = [&sleep]() {
+      std::this_thread::sleep_for(std::chrono::nanoseconds(sleep));
+      sleep = std::min(sleep * 2, MaxSleep);
+    };
   if constexpr (sizeof...(Signals) == 1) {
     auto& signal = std::get<0>(std::tie(signals ...));
     using signal_type = std::decay_t<decltype(signal)>;
@@ -207,17 +217,18 @@ eager_select(
           }
           ++i;
         }
+        back_off();
       }
     } else {
       while (!type_helper::isReady(signal)) {
-        std::this_thread::sleep_for(std::chrono::nanoseconds(Sleep));
+        back_off();
       }
       return type_helper::getValue(signal);
     }
   } else {
     std::optional<ReturnType> selected;
     while (!_eager_select_predicate(selected, std::index_sequence_for<Signals...>{ }, signals ...)) {
-      std::this_thread::sleep_for(std::chrono::nanoseconds(Sleep));
+      back_off();
     }
     SCU_ASSUME(selected.has_value());
     return std::move(selected).value();
