@@ -179,6 +179,30 @@ TEST(ScorpioUdp, StreamsAreRejectedUntilAccepted) {
   EXPECT_EQ(stream->state(), ScorpioUdpStream::State::REJECTED);
 }
 
+// A stream created on a connection that already closed is never activated: no stream is handed out, nothing
+// throws, and destroying it must leave the connection's stream bookkeeping alone and free its slot
+TEST(ScorpioUdp, NoStreamOnAClosedConnection) {
+  const auto port = PORT;
+  auto server = create_server(port);
+  auto client = create_client();
+  ASSERT_TRUE(server);
+  ASSERT_TRUE(client);
+  auto client_connection = client->connect(localhost, port);
+  ASSERT_TRUE(client_connection);
+  ASSERT_TRUE(wait_for([&] { return connected(client_connection); }));
+  // Another stream keeps the mask bookkeeping busy around the one that never activates
+  auto active = client_connection->create_stream(2, { 0, ScorpioUdpStream::StreamQoS::Reliability::UNRELIABLE });
+  ASSERT_TRUE(active);
+  ASSERT_TRUE(wait_for([&] { return active->state() != ScorpioUdpStream::State::NEW; }));
+
+  client_connection->close();
+  std::shared_ptr<ScorpioUdpStream> stream;
+  EXPECT_NO_THROW(stream = client_connection->create_stream(
+      1, { 0, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED }));
+  EXPECT_FALSE(stream);
+  EXPECT_FALSE(client_connection->is_stream_slot_occupied(1));
+}
+
 TEST(ScorpioUdp, ClientServerCreation) {
   EXPECT_TRUE(create_server(PORT));
   EXPECT_TRUE(create_client());

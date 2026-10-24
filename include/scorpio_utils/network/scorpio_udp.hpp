@@ -276,6 +276,9 @@ private:
   std::atomic<size_t> _least_non_delivered_seq_number;
   std::atomic<State> _state;
   std::atomic<size_t> _creation_tries;
+  // Set by activate_stream() under the connection's _streams_mask_write_mutex: only an activated stream holds its
+  // bits in the connection's stream masks (a stream can be destroyed before it is ever activated)
+  bool _activated;
   Orderer<std::pair<MessageHeader, std::vector<uint8_t>>> _orderer;
   std::shared_ptr<logger::Logger> _logger;
   struct UnreliableData {

@@ -1782,6 +1782,15 @@ bool ScorpioUdpConnection::close(bool send_disconnect) {
   // Stop the processing thread before touching _streams: the weak_ptr objects in
   // it may only be accessed by that thread or after it has been joined.
   _stop.store(true, std::memory_order_relaxed);
+  // Streams still waiting to be activated fail like the active ones closed below, otherwise they would stay NEW
+  // forever (and keep this connection alive, a stream holds its parent)
+  try {
+    while (auto stream = _awaiting_streams.receive<false>()) {
+      (*stream)->panic("Connection closed before the stream was created");
+    }
+  } catch (const threading::ClosedChannelException&) {
+    // Closed (and drained) by an earlier close(), e.g. before the destructor's
+  }
   _new_streams.close();
   _awaiting_streams.close();
   _incoming_packets.close();
@@ -1842,7 +1851,12 @@ std::shared_ptr<ScorpioUdpStream> ScorpioUdpConnection::create_stream(
   std::shared_ptr<ScorpioUdpStream> stream(new ScorpioUdpStream(stream_id,
     _streams_epoch[stream_id].fetch_add(1, std::memory_order_relaxed), qos, false,
     shared_from_this()));
-  _awaiting_streams.send<true>(stream);
+  try {
+    _awaiting_streams.send<true>(stream);
+  } catch (const threading::ClosedChannelException&) {
+    // The connection closed meanwhile: no stream (it releases its slot when destroyed here)
+    return std::shared_ptr<ScorpioUdpStream>();
+  }
   return stream;
 }
 
@@ -1862,6 +1876,7 @@ ScorpioUdpStream::ScorpioUdpStream(
   _least_non_delivered_seq_number(0),
   _state(State::NEW),
   _creation_tries(0),
+  _activated(false),
   _orderer(stream_qos.depth_value() + SCU_UDP_QOS_DEPTH_SAFETY_BUFFER),
   _logger(_parent->_logger),
   _partial_data(std::in_place_index_t<0>{ }),
@@ -1891,7 +1906,9 @@ ScorpioUdpStream::~ScorpioUdpStream() {
   {
     std::lock_guard lock(_parent->_streams_mask_write_mutex);
     uint64_t current_state = _parent->_streams_mask[mask_index].load(std::memory_order_relaxed);
-    if ((current_state & ~mask_position_mask) == 0) {
+    // A stream destroyed before it was activated (its connection closed first, or it failed while being
+    // activated) never set its mask bits
+    if (_activated && (current_state & ~mask_position_mask) == 0) {
       current_state = _parent->_streams_mask_level_2[mask_level2_index].load(std::memory_order_relaxed);
       do {
         SCU_ASSERT(current_state & mask_level2_position_mask,
@@ -1902,12 +1919,15 @@ ScorpioUdpStream::~ScorpioUdpStream() {
          std::memory_order_relaxed));
       current_state = _parent->_streams_mask[mask_index].load(std::memory_order_relaxed);
     }
-    do {
+    while (_activated) {
       SCU_ASSERT(current_state & mask_position_mask, "Stream mask bit was already cleared on destruction");
-    } while (!_parent->_streams_mask[mask_index].compare_exchange_weak(current_state,
-      current_state & ~mask_position_mask,
-        std::memory_order_relaxed,
-        std::memory_order_relaxed));
+      if (_parent->_streams_mask[mask_index].compare_exchange_weak(current_state,
+        current_state & ~mask_position_mask,
+          std::memory_order_relaxed,
+          std::memory_order_relaxed)) {
+        break;
+      }
+    }
   }
   // Deliberately not touching _parent->_streams[_stream_number] here: destructors
   // run on arbitrary application threads and the weak_ptr objects in _streams may
@@ -2542,5 +2562,6 @@ void ScorpioUdpStream::activate_stream() {
     current_state | mask_level2_position_mask,
       std::memory_order_relaxed,
       std::memory_order_relaxed)) { }
+  _activated = true;
   _parent->_streams[_stream_number] = weak_from_this();
 }
