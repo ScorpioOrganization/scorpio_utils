@@ -2274,6 +2274,13 @@ void ScorpioUdpStream::handle_data_packet(const MessageHeader& header, UdpData&&
   }
 }
 
+size_t ScorpioUdpStream::retained_packet_count() {
+  std::lock_guard lock(_sent_history_mutex);
+  const auto retained = std::count_if(_sent_history.begin(), _sent_history.end(),
+      [](const std::optional<SentPacket>& packet) { return packet.has_value(); });
+  return SCU_AS(size_t, retained);
+}
+
 SCU_HOT bool ScorpioUdpStream::send(const std::vector<uint8_t>& data) {
   if (SCU_UNLIKELY(!is_active())) {
     return false;
@@ -2398,6 +2405,15 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
     // level, or send() could falsely detect a QoS depth overflow.
     // (This is the only place where _least_non_delivered_seq_number is modified.)
     _least_non_delivered_seq_number.store(cursor, std::memory_order_relaxed);
+    // The peer has everything below cursor: release those packets now. Left until the ring wraps, every busy reliable
+    // stream keeps depth + SCU_UDP_QOS_DEPTH_SAFETY_BUFFER sent packets alive. A peer that asks for one again later
+    // gets it handled like an evicted packet (stuck tracking, panic if it persists).
+    for (auto i = std::max(previous_least, sat_sub(cursor, _sent_history.size())); i < cursor; ++i) {
+      auto& packet = _sent_history[i % _sent_history.size()];
+      if (packet.has_value() && packet->seq == i) {
+        packet.reset();
+      }
+    }
   }
   // This pass's contiguous ack boundary as reported by the peer: everything below it is
   // covered by this heartbeat's own account of what it has received, so stuck-resend

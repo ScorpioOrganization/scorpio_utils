@@ -203,6 +203,35 @@ TEST(ScorpioUdp, NoStreamOnAClosedConnection) {
   EXPECT_FALSE(client_connection->is_stream_slot_occupied(1));
 }
 
+// Packets the peer acknowledged are released right away, a busy reliable stream must not keep its whole send history
+// (depth + SCU_UDP_QOS_DEPTH_SAFETY_BUFFER packets) alive until the ring wraps
+TEST(ScorpioUdp, AcknowledgedPacketsAreReleased) {
+  const auto [client_connection, server_connection] = get_client_server_connection(PORT);
+  ASSERT_TRUE(client_connection);
+  ASSERT_TRUE(server_connection);
+  server_connection->set_auto_accept_stream(true);
+  const ScorpioUdpStream::StreamQoS qos{ 1, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED };
+  auto client_stream = client_connection->create_stream(1, qos);
+  ASSERT_TRUE(client_stream);
+  ASSERT_TRUE(wait_for([&] { return creation_finished(client_stream); }));
+  ASSERT_TRUE(client_stream->is_active());
+  auto server_stream = server_connection->get_accepted_stream();
+  ASSERT_TRUE(server_stream.has_value());
+
+  constexpr size_t NUM_PACKETS = 200;
+  const std::vector<uint8_t> data(64, 0xAB);
+  for (size_t i = 0; i < NUM_PACKETS; ++i) {
+    ASSERT_TRUE(client_stream->send(data));
+  }
+  for (size_t i = 0; i < NUM_PACKETS; ++i) {
+    EXPECT_EQ(server_stream.value()->receive<true>(), data);
+  }
+  // The next heartbeats of the receiver acknowledge everything
+  EXPECT_TRUE(wait_for([&] { return client_stream->retained_packet_count() == 0; }))
+    << client_stream->retained_packet_count() << " acknowledged packets still retained";
+  EXPECT_EQ(client_stream->out_of_history_drop_count(), 0u);
+}
+
 TEST(ScorpioUdp, ClientServerCreation) {
   EXPECT_TRUE(create_server(PORT));
   EXPECT_TRUE(create_client());

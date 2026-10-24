@@ -387,6 +387,8 @@ public:
   SCU_ALWAYS_INLINE auto out_of_history_drop_count() const noexcept {
     return _out_of_history_drop_count.load(std::memory_order_relaxed);
   }
+  /// Sent packets kept for retransmission, i.e. not acknowledged by the peer yet (diagnostics, walks the history)
+  size_t retained_packet_count();
   SCU_ALWAYS_INLINE auto expired_unreliable_fragment_count() const noexcept {
     return _expired_unreliable_fragment_count.load(std::memory_order_relaxed);
   }
