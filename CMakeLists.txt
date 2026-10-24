@@ -139,6 +139,7 @@ if(BUILD_TESTING)
     threading/test_thread_streams.cpp
     threading/test_wait_group.cpp
     time_provider/test_lazy_time_provider.cpp
+    time_provider/test_steady_time_provider.cpp
     time_provider/test_system_time_provider.cpp
     time_utils/test_time_string.cpp
     test_buffered_file_saver.cpp

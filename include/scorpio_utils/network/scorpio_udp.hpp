@@ -47,6 +47,11 @@
 #define SCU_UDP_HEARTBEAT_PERIOD (50'000'000)
 #define SCU_UDP_TIMEOUT (5'000'000'000)
 #define SCU_UDP_CREATE_RETRY_PERIOD (5'000'000'000)
+// The ScorpioUdp threads poll every 10 us while there is traffic and back off up to this sleep while idle, so a
+// packet arriving after an idle period waits up to this long per thread
+#ifndef SCU_UDP_IDLE_MAX_SLEEP
+#define SCU_UDP_IDLE_MAX_SLEEP (1'000'000)  // 1 millisecond
+#endif
 // Minimum time between retransmissions of the same packet. Without it a packet in
 // flight longer than one heartbeat period would be resent on every heartbeat,
 // amplifying congestion into a retransmission storm.
@@ -245,7 +250,8 @@ public:
 
 private:
   friend class ScorpioUdpConnection;
-  threading::Channel<std::vector<uint8_t>, 1024 * 1024> _receive;
+  // Unbounded: memory follows the backlog and delivering never blocks the connection processing thread
+  threading::Channel<std::vector<uint8_t>, 0> _receive;
   const StreamNumber _stream_number;
   const StreamEpoch _stream_epoch;
   const StreamQoS _stream_qos;
@@ -270,6 +276,9 @@ private:
   std::atomic<size_t> _least_non_delivered_seq_number;
   std::atomic<State> _state;
   std::atomic<size_t> _creation_tries;
+  // Set by activate_stream() under the connection's _streams_mask_write_mutex: only an activated stream holds its
+  // bits in the connection's stream masks (a stream can be destroyed before it is ever activated)
+  bool _activated;
   Orderer<std::pair<MessageHeader, std::vector<uint8_t>>> _orderer;
   std::shared_ptr<logger::Logger> _logger;
   struct UnreliableData {
@@ -378,6 +387,8 @@ public:
   SCU_ALWAYS_INLINE auto out_of_history_drop_count() const noexcept {
     return _out_of_history_drop_count.load(std::memory_order_relaxed);
   }
+  /// Sent packets kept for retransmission, i.e. not acknowledged by the peer yet (diagnostics, walks the history)
+  size_t retained_packet_count();
   SCU_ALWAYS_INLINE auto expired_unreliable_fragment_count() const noexcept {
     return _expired_unreliable_fragment_count.load(std::memory_order_relaxed);
   }
@@ -452,7 +463,8 @@ private:
   uint16_t _next_stream_to_heartbeat;
   std::mutex _close_mutex;
   threading::Channel<std::shared_ptr<ScorpioUdpStream>, 1024> _new_streams;
-  threading::Channel<std::pair<MessageHeader, UdpData>, 1024 * 1024> _incoming_packets;
+  // Unbounded: memory follows the backlog and the receiving thread never blocks on a busy connection
+  threading::Channel<std::pair<MessageHeader, UdpData>, 0> _incoming_packets;
   threading::Channel<std::shared_ptr<ScorpioUdpStream>, 1024> _awaiting_streams;
   constexpr static size_t max_streams_count = std::numeric_limits<StreamNumber>::max() + 1;
   // The fact that there is a second level of stream mask makes stream removal impossible
@@ -632,6 +644,7 @@ class ScorpioUdp : public std::enable_shared_from_this<ScorpioUdp> {
   std::atomic<uint64_t> _received_bytes;
   std::atomic<uint64_t> _send_bytes;
   std::atomic<bool> _auto_accept;
+  std::atomic<bool> _auto_accept_streams;
   std::atomic<bool> _stop;
   threading::Signal _start_signal;
   std::shared_ptr<logger::Logger> _logger;
@@ -769,6 +782,19 @@ public:
 
   SCU_ALWAYS_INLINE auto set_auto_accept(bool auto_accept) noexcept {
     return _auto_accept.exchange(auto_accept, std::memory_order_relaxed);
+  }
+
+  SCU_ALWAYS_INLINE auto is_auto_accept_streams() const noexcept {
+    return _auto_accept_streams.load(std::memory_order_relaxed);
+  }
+
+  /**
+   * Sets the initial `set_auto_accept_stream()` value of the connections created from now on (accepted and dialed).
+   * Setting it on a connection after it is handed out leaves a window in which the peer, already connected,
+   * gets its CREATE_STREAM rejected.
+   */
+  SCU_ALWAYS_INLINE auto set_auto_accept_streams(bool auto_accept) noexcept {
+    return _auto_accept_streams.exchange(auto_accept, std::memory_order_relaxed);
   }
 
   template<bool Wait = false>

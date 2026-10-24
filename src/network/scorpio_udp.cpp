@@ -1,5 +1,6 @@
 #include "scorpio_utils/network/scorpio_udp.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <exception>
@@ -12,6 +13,7 @@
 #include "scorpio_utils/misc.hpp"
 #include "scorpio_utils/network/types.hpp"
 #include "scorpio_utils/sat_math.hpp"
+#include "scorpio_utils/threading/thread_name.hpp"
 
 /**
  * Possible optimizations:
@@ -128,7 +130,12 @@ std::shared_ptr<TimeProvider> ScorpioUdp::get_time_provider() {
   if (auto provider = weak_provider.lock()) {
     return provider;
   }
+#ifdef SCU_UDP_MOCK
   auto provider = std::make_shared<TimeProvider>();
+#else
+  // Heartbeats and timeouts measure durations: a step of the system time must not fake or delay them
+  auto provider = std::make_shared<TimeProvider>(100'000'000, TimeProvider::Clock::MONOTONIC);
+#endif
   weak_provider = provider;
   return provider;
 }
@@ -167,6 +174,7 @@ ScorpioUdp::ScorpioUdp(
   _received_bytes(0),
   _send_bytes(0),
   _auto_accept(false),
+  _auto_accept_streams(false),
   _stop(true),
   _logger(logger),
   _panic(false),
@@ -309,6 +317,7 @@ SCU_NORETURN SCU_COLD void ScorpioUdp::panic(std::string&& message) {
 }
 
 void ScorpioUdp::receiver_thread() {
+  threading::set_current_thread_name("sudp_recv");
   try {
     while (SCU_LIKELY(!_stop.load(std::memory_order_relaxed))) {
       std::vector<uint8_t> data(SCU_UDP_MAX_PACKET_SIZE);
@@ -335,6 +344,9 @@ void ScorpioUdp::receiver_thread() {
 }
 
 void ScorpioUdp::sender_thread() {
+  threading::set_current_thread_name("sudp_send");
+  constexpr size_t busy_sleep = 10'000;  // 10 us while there is traffic, backing off up to SCU_UDP_IDLE_MAX_SLEEP
+  size_t sleep = busy_sleep;
   try {
     while (SCU_LIKELY(!_stop.load(std::memory_order_relaxed))) {
       // Strict priority: control packets (heartbeats, handshakes) always go out
@@ -344,9 +356,11 @@ void ScorpioUdp::sender_thread() {
         msg_opt = _sender_channel.receive();
       }
       if (!msg_opt.has_value()) {
-        std::this_thread::sleep_for(std::chrono::microseconds(10));
+        std::this_thread::sleep_for(std::chrono::nanoseconds(sleep));
+        sleep = std::min<size_t>(sleep * 2, SCU_UDP_IDLE_MAX_SLEEP);
         continue;
       }
+      sleep = busy_sleep;
       auto& msg = *msg_opt;
       SCU_ASSERT(msg.data.size() <= SCU_UDP_MAX_PACKET_SIZE,
         "UDP message size is too large (" << msg.data.size()
@@ -371,6 +385,7 @@ void ScorpioUdp::sender_thread() {
 }
 
 void ScorpioUdp::processing_thread() {
+  threading::set_current_thread_name("sudp_proc");
   try {
     _start_signal.wait();
     const auto self_weak = weak_from_this();
@@ -386,7 +401,8 @@ void ScorpioUdp::processing_thread() {
           pull_awaiting_connections(connection);
         },
         [] (Empty) SCU_ALWAYS_INLINE_RAW { /* Timeout */ },
-      }, threading::eager_select(_receiver_channel, _awaiting_connections_channel, timeout.start()));
+      }, threading::eager_select<10'000, SCU_UDP_IDLE_MAX_SLEEP>(
+        _receiver_channel, _awaiting_connections_channel, timeout.start()));
     }
   } catch (const PanicException&) {
   } catch (const threading::ClosedChannelException&) {
@@ -454,6 +470,8 @@ void ScorpioUdp::handle_connect_packet(const MessageHeader& header, const UdpDat
         } else if (_auto_accept.load(std::memory_order_relaxed)) {
           std::shared_ptr<ScorpioUdpConnection> new_connection(new ScorpioUdpConnection(
                       udp_data.ip, udp_data.port, connection_id, false, shared_from_this()));
+          // Before ACCEPTED goes out: the peer may create streams right after receiving it
+          new_connection->set_auto_accept_stream(_auto_accept_streams.load(std::memory_order_relaxed));
           new_connection->_start_signal.notify(100000);
           new_connection->_state.store(ScorpioUdpConnection::State::CONNECTING);
           _connections.insert({ { udp_data.ip, udp_data.port }, new_connection });
@@ -584,6 +602,13 @@ void ScorpioUdp::handle_disconnect_packet(const MessageHeader& header, const Udp
             udp_data.ip.str(), udp_data.port, connection_id);
           connection_opt->panic_soft("Peer reports this connection as disconnected (peer restarted?)");
         }
+      } break;
+    case Code::DisconnectSubCommands::ACCEPTED:
+      [[fallthrough]];
+    case Code::DisconnectSubCommands::REJECTED: {
+        // The peer's reply to our DISCONNECT, the local connection is already closed
+        SCU_LOG_DEBUG(_logger, "Received DISCONNECT reply {} from {}:{}",
+          udp_data.data[header.data_offset], udp_data.ip.str(), udp_data.port);
       } break;
     default: {
         // TODO(@Igor): Handle error properly
@@ -846,6 +871,7 @@ std::shared_ptr<ScorpioUdpConnection> ScorpioUdp::connect(
   Port port) {
   std::shared_ptr<ScorpioUdpConnection> connection(new ScorpioUdpConnection(ip, port, get_random_number(), true,
     shared_from_this()));
+  connection->set_auto_accept_stream(_auto_accept_streams.load(std::memory_order_relaxed));
   connection->_start_signal.notify(100000);
   _awaiting_connections_channel.send<true>(connection);
   return connection;
@@ -1533,6 +1559,7 @@ void ScorpioUdpConnection::send_heartbeat() {
 }
 
 void ScorpioUdpConnection::processing_thread() {
+  threading::set_current_thread_name("sudp_conn");
   std::weak_ptr<ScorpioUdpConnection> self_weak;
   std::shared_ptr<ScorpioUdpConnection> self;
   // On every exit path: if the connection died abnormally (panic or rejection),
@@ -1615,7 +1642,7 @@ void ScorpioUdpConnection::processing_thread() {
           pull_awaiting_streams(std::move(stream));
         },
         [] (Empty) SCU_ALWAYS_INLINE_RAW { /* Timeout */ },
-      }, threading::eager_select(_incoming_packets, _awaiting_streams, timeout));
+      }, threading::eager_select<10'000, SCU_UDP_IDLE_MAX_SLEEP>(_incoming_packets, _awaiting_streams, timeout));
       if (timeout.is_elapsed()) {
         send_heartbeat();
         timeout.reset();
@@ -1755,6 +1782,15 @@ bool ScorpioUdpConnection::close(bool send_disconnect) {
   // Stop the processing thread before touching _streams: the weak_ptr objects in
   // it may only be accessed by that thread or after it has been joined.
   _stop.store(true, std::memory_order_relaxed);
+  // Streams still waiting to be activated fail like the active ones closed below, otherwise they would stay NEW
+  // forever (and keep this connection alive, a stream holds its parent)
+  try {
+    while (auto stream = _awaiting_streams.receive<false>()) {
+      (*stream)->panic("Connection closed before the stream was created");
+    }
+  } catch (const threading::ClosedChannelException&) {
+    // Closed (and drained) by an earlier close(), e.g. before the destructor's
+  }
   _new_streams.close();
   _awaiting_streams.close();
   _incoming_packets.close();
@@ -1815,7 +1851,12 @@ std::shared_ptr<ScorpioUdpStream> ScorpioUdpConnection::create_stream(
   std::shared_ptr<ScorpioUdpStream> stream(new ScorpioUdpStream(stream_id,
     _streams_epoch[stream_id].fetch_add(1, std::memory_order_relaxed), qos, false,
     shared_from_this()));
-  _awaiting_streams.send<true>(stream);
+  try {
+    _awaiting_streams.send<true>(stream);
+  } catch (const threading::ClosedChannelException&) {
+    // The connection closed meanwhile: no stream (it releases its slot when destroyed here)
+    return std::shared_ptr<ScorpioUdpStream>();
+  }
   return stream;
 }
 
@@ -1835,6 +1876,7 @@ ScorpioUdpStream::ScorpioUdpStream(
   _least_non_delivered_seq_number(0),
   _state(State::NEW),
   _creation_tries(0),
+  _activated(false),
   _orderer(stream_qos.depth_value() + SCU_UDP_QOS_DEPTH_SAFETY_BUFFER),
   _logger(_parent->_logger),
   _partial_data(std::in_place_index_t<0>{ }),
@@ -1864,7 +1906,9 @@ ScorpioUdpStream::~ScorpioUdpStream() {
   {
     std::lock_guard lock(_parent->_streams_mask_write_mutex);
     uint64_t current_state = _parent->_streams_mask[mask_index].load(std::memory_order_relaxed);
-    if ((current_state & ~mask_position_mask) == 0) {
+    // A stream destroyed before it was activated (its connection closed first, or it failed while being
+    // activated) never set its mask bits
+    if (_activated && (current_state & ~mask_position_mask) == 0) {
       current_state = _parent->_streams_mask_level_2[mask_level2_index].load(std::memory_order_relaxed);
       do {
         SCU_ASSERT(current_state & mask_level2_position_mask,
@@ -1875,12 +1919,15 @@ ScorpioUdpStream::~ScorpioUdpStream() {
          std::memory_order_relaxed));
       current_state = _parent->_streams_mask[mask_index].load(std::memory_order_relaxed);
     }
-    do {
+    while (_activated) {
       SCU_ASSERT(current_state & mask_position_mask, "Stream mask bit was already cleared on destruction");
-    } while (!_parent->_streams_mask[mask_index].compare_exchange_weak(current_state,
-      current_state & ~mask_position_mask,
-        std::memory_order_relaxed,
-        std::memory_order_relaxed));
+      if (_parent->_streams_mask[mask_index].compare_exchange_weak(current_state,
+        current_state & ~mask_position_mask,
+          std::memory_order_relaxed,
+          std::memory_order_relaxed)) {
+        break;
+      }
+    }
   }
   // Deliberately not touching _parent->_streams[_stream_number] here: destructors
   // run on arbitrary application threads and the weak_ptr objects in _streams may
@@ -2227,6 +2274,13 @@ void ScorpioUdpStream::handle_data_packet(const MessageHeader& header, UdpData&&
   }
 }
 
+size_t ScorpioUdpStream::retained_packet_count() {
+  std::lock_guard lock(_sent_history_mutex);
+  const auto retained = std::count_if(_sent_history.begin(), _sent_history.end(),
+      [](const std::optional<SentPacket>& packet) { return packet.has_value(); });
+  return SCU_AS(size_t, retained);
+}
+
 SCU_HOT bool ScorpioUdpStream::send(const std::vector<uint8_t>& data) {
   if (SCU_UNLIKELY(!is_active())) {
     return false;
@@ -2351,6 +2405,15 @@ void ScorpioUdpStream::handle_heartbeat_data(const std::vector<uint8_t>& data, s
     // level, or send() could falsely detect a QoS depth overflow.
     // (This is the only place where _least_non_delivered_seq_number is modified.)
     _least_non_delivered_seq_number.store(cursor, std::memory_order_relaxed);
+    // The peer has everything below cursor: release those packets now. Left until the ring wraps, every busy reliable
+    // stream keeps depth + SCU_UDP_QOS_DEPTH_SAFETY_BUFFER sent packets alive. A peer that asks for one again later
+    // gets it handled like an evicted packet (stuck tracking, panic if it persists).
+    for (auto i = std::max(previous_least, sat_sub(cursor, _sent_history.size())); i < cursor; ++i) {
+      auto& packet = _sent_history[i % _sent_history.size()];
+      if (packet.has_value() && packet->seq == i) {
+        packet.reset();
+      }
+    }
   }
   // This pass's contiguous ack boundary as reported by the peer: everything below it is
   // covered by this heartbeat's own account of what it has received, so stuck-resend
@@ -2515,5 +2578,6 @@ void ScorpioUdpStream::activate_stream() {
     current_state | mask_level2_position_mask,
       std::memory_order_relaxed,
       std::memory_order_relaxed)) { }
+  _activated = true;
   _parent->_streams[_stream_number] = weak_from_this();
 }

@@ -80,7 +80,22 @@ SCU_UDP_UNRELIABLE_DATA_EXPIRY_NS    = 500'000'000
 SCU_UDP_HEARTBEAT_PERIOD             = 50'000'000  (ns)
 SCU_UDP_TIMEOUT                      = 5'000'000'000
 SCU_UDP_CREATE_RETRY_PERIOD          = 5'000'000'000
+SCU_UDP_IDLE_MAX_SLEEP               = 1'000'000  (ns, longest poll sleep of the ScorpioUdp threads while idle)
 ```
+
+ScorpioUdp measures its heartbeats and timeouts on the monotonic clock (its shared `LazyTimeProvider` uses
+`Clock::MONOTONIC`), so a step of the system time cannot fake or delay a timeout; no time goes on the wire.
+`ScorpioUdp::set_auto_accept_streams(true)` makes every new connection (accepted or dialed) accept peer-created
+streams before it is handed out; setting `set_auto_accept_stream` on a connection afterwards leaves a window in
+which the already connected peer gets its CREATE_STREAM rejected. Its threads are named `sudp_recv`, `sudp_send`,
+`sudp_proc`, `sudp_conn`.
+
+A reliable stream keeps each sent packet in a ring of `depth + SCU_UDP_QOS_DEPTH_SAFETY_BUFFER` slots until the
+peer's heartbeat acknowledges it, then releases it (`retained_packet_count()` shows what is still held); a later
+request for an acknowledged packet is handled like one for an evicted packet (stuck tracking, the stream panics if
+the peer keeps asking for `SCU_UDP_TIMEOUT`). A stream created on a connection
+that closes before activating it fails (`close()` panics the queued ones) and `create_stream` on a closed connection
+returns null; only an activated stream owns bits in the connection's stream masks.
 
 The scorpio_udp protocol is described in @SCORPIO_UDP_PROTOCOL.md.
 
@@ -88,8 +103,9 @@ The scorpio_udp protocol is described in @SCORPIO_UDP_PROTOCOL.md.
 
 [threading/](include/scorpio_utils/threading/) is the largest module. Notable pieces:
 
-- `Channel<T, Capacity>` ([channel.hpp](include/scorpio_utils/threading/channel.hpp)) — fixed-capacity MPMC queue, throws `ClosedChannelException` on send/receive after close. `Capacity` is a compile-time constant; the network framework variant uses `1024 * 1024`.
-- `EagerSelect` ([eager_select.hpp](include/scorpio_utils/threading/eager_select.hpp)) — `select`-style multiplexer over anything exposing `SCU_EAGER_SELECT_IS_READY()` / `SCU_EAGER_SELECT_GET_VALUE()`. Channels and `ScorpioUdpStream` both implement this protocol so they can be waited on uniformly.
+- `Channel<T, Capacity>` ([channel.hpp](include/scorpio_utils/threading/channel.hpp)) — fixed-capacity MPMC queue, throws `ClosedChannelException` on send/receive after close. `Capacity` is a compile-time constant (the network framework variant's socket channels use `1024 * 1024`); every slot is a cache line touched in the constructor, so RSS is the full capacity. `Channel<T, 0>` is the unbounded variant (deque behind a mutex, same API and semantics, sending never blocks): use it where a full channel would block a producer that must not stall, or where a big capacity would only be reserved memory (ScorpioUdp stream and connection channels, `OSLogger`).
+- `EagerSelect` ([eager_select.hpp](include/scorpio_utils/threading/eager_select.hpp)) — `select`-style multiplexer over anything exposing `SCU_EAGER_SELECT_IS_READY()` / `SCU_EAGER_SELECT_GET_VALUE()`. Channels and `ScorpioUdpStream` both implement this protocol so they can be waited on uniformly. It polls: `eager_select<Sleep, MaxSleep>` sleeps `Sleep` ns between checks and, with `MaxSleep > Sleep`, doubles the sleep while nothing is ready up to `MaxSleep` (cheap idle loops, at the cost of noticing a signal up to `MaxSleep` later).
+- `set_current_thread_name` ([thread_name.hpp](include/scorpio_utils/threading/thread_name.hpp)) — names the calling thread (15 characters at most) for `top -H` and debuggers.
 - `Signal`, `WaitGroup`, `AndThen`, `Future`, `JThread`, `ThreadPool`, `ThreadStreams`, `Waitable` round out the rest.
 
 When adding a type that should compose with `EagerSelect`, implement both `SCU_EAGER_SELECT_IS_READY` and `SCU_EAGER_SELECT_GET_VALUE` and check the trait check in [eager_select.hpp](include/scorpio_utils/threading/eager_select.hpp) passes.
@@ -97,6 +113,8 @@ When adding a type that should compose with `EagerSelect`, implement both `SCU_E
 ### Time providers and dependency injection
 
 Code that reads "now" takes a `time_provider::TimeProvider*` rather than calling `std::chrono` directly. Production code uses [`LazyTimeProvider`](include/scorpio_utils/time_provider/lazy_time_provider.hpp); tests inject [`MockTimeProvider`](include/scorpio_utils/testing/mock_time_provider.hpp) to drive simulated clocks. Don't bypass this — the ScorpioUDP test variants depend on it for deterministic time travel.
+
+`SystemTimeProvider` and the default `LazyTimeProvider` follow the wall clock (`system_clock`), which jumps when the system time is set (NTP at rover boot). Durations and timeouts should use [`SteadyTimeProvider`](include/scorpio_utils/time_provider/steady_time_provider.hpp) or `LazyTimeProvider(offset, LazyTimeProvider::Clock::MONOTONIC)`; keep the wall clock for timestamps people read or record.
 
 ### ROS-specific helpers
 

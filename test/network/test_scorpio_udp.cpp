@@ -118,6 +118,120 @@ TEST(ScorpioUdp, BasicSend) {
   }
 }
 
+// Waits until the connection or the stream leaves its initial/handshake state
+template<typename Pred>
+bool wait_for(Pred&& done, std::chrono::milliseconds timeout = std::chrono::milliseconds(2000)) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (!done() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return done();
+}
+
+bool creation_finished(const std::shared_ptr<ScorpioUdpStream>& stream) {
+  const auto state = stream->state();
+  return state != ScorpioUdpStream::State::NEW && state != ScorpioUdpStream::State::CREATING;
+}
+
+bool connected(const std::shared_ptr<ScorpioUdpConnection>& connection) {
+  return connection->state() == ScorpioUdpConnection::State::CONNECTED;
+}
+
+TEST(ScorpioUdp, AutoAcceptStreamsAppliesToNewConnectionsBeforeTheyAreHandedOut) {
+  const auto port = PORT;
+  auto server = create_server(port);
+  auto client = create_client();
+  ASSERT_TRUE(server);
+  ASSERT_TRUE(client);
+  EXPECT_FALSE(server->set_auto_accept_streams(true));
+  EXPECT_TRUE(server->is_auto_accept_streams());
+  std::ignore = client->set_auto_accept_streams(true);
+
+  // The client creates a stream the moment it is connected, while nobody has touched the accepted connection
+  auto client_connection = client->connect(localhost, port);
+  ASSERT_TRUE(client_connection);
+  EXPECT_TRUE(client_connection->is_auto_accept_stream());
+  ASSERT_TRUE(wait_for([&] { return connected(client_connection); }));
+  auto stream = client_connection->create_stream(1, { 0, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED });
+  ASSERT_TRUE(stream);
+  ASSERT_TRUE(wait_for([&] { return creation_finished(stream); }));
+  EXPECT_EQ(stream->state(), ScorpioUdpStream::State::CREATED);
+
+  auto server_connection = server->get_accepted_connection();
+  ASSERT_TRUE(server_connection.has_value());
+  EXPECT_TRUE(server_connection.value()->is_auto_accept_stream());
+  EXPECT_TRUE(server_connection.value()->get_accepted_stream().has_value());
+}
+
+TEST(ScorpioUdp, StreamsAreRejectedUntilAccepted) {
+  const auto port = PORT;
+  auto server = create_server(port);
+  auto client = create_client();
+  ASSERT_TRUE(server);
+  ASSERT_TRUE(client);
+
+  auto client_connection = client->connect(localhost, port);
+  ASSERT_TRUE(client_connection);
+  ASSERT_TRUE(wait_for([&] { return connected(client_connection); }));
+  auto stream = client_connection->create_stream(1, { 0, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED });
+  ASSERT_TRUE(stream);
+  ASSERT_TRUE(wait_for([&] { return creation_finished(stream); }));
+  EXPECT_EQ(stream->state(), ScorpioUdpStream::State::REJECTED);
+}
+
+// A stream created on a connection that already closed is never activated: no stream is handed out, nothing
+// throws, and destroying it must leave the connection's stream bookkeeping alone and free its slot
+TEST(ScorpioUdp, NoStreamOnAClosedConnection) {
+  const auto port = PORT;
+  auto server = create_server(port);
+  auto client = create_client();
+  ASSERT_TRUE(server);
+  ASSERT_TRUE(client);
+  auto client_connection = client->connect(localhost, port);
+  ASSERT_TRUE(client_connection);
+  ASSERT_TRUE(wait_for([&] { return connected(client_connection); }));
+  // Another stream keeps the mask bookkeeping busy around the one that never activates
+  auto active = client_connection->create_stream(2, { 0, ScorpioUdpStream::StreamQoS::Reliability::UNRELIABLE });
+  ASSERT_TRUE(active);
+  ASSERT_TRUE(wait_for([&] { return active->state() != ScorpioUdpStream::State::NEW; }));
+
+  client_connection->close();
+  std::shared_ptr<ScorpioUdpStream> stream;
+  EXPECT_NO_THROW(stream = client_connection->create_stream(
+      1, { 0, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED }));
+  EXPECT_FALSE(stream);
+  EXPECT_FALSE(client_connection->is_stream_slot_occupied(1));
+}
+
+// Packets the peer acknowledged are released right away, a busy reliable stream must not keep its whole send history
+// (depth + SCU_UDP_QOS_DEPTH_SAFETY_BUFFER packets) alive until the ring wraps
+TEST(ScorpioUdp, AcknowledgedPacketsAreReleased) {
+  const auto [client_connection, server_connection] = get_client_server_connection(PORT);
+  ASSERT_TRUE(client_connection);
+  ASSERT_TRUE(server_connection);
+  server_connection->set_auto_accept_stream(true);
+  const ScorpioUdpStream::StreamQoS qos{ 1, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED };
+  auto client_stream = client_connection->create_stream(1, qos);
+  ASSERT_TRUE(client_stream);
+  ASSERT_TRUE(wait_for([&] { return creation_finished(client_stream); }));
+  ASSERT_TRUE(client_stream->is_active());
+  auto server_stream = server_connection->get_accepted_stream();
+  ASSERT_TRUE(server_stream.has_value());
+
+  constexpr size_t NUM_PACKETS = 200;
+  const std::vector<uint8_t> data(64, 0xAB);
+  for (size_t i = 0; i < NUM_PACKETS; ++i) {
+    ASSERT_TRUE(client_stream->send(data));
+  }
+  for (size_t i = 0; i < NUM_PACKETS; ++i) {
+    EXPECT_EQ(server_stream.value()->receive<true>(), data);
+  }
+  // The next heartbeats of the receiver acknowledge everything
+  EXPECT_TRUE(wait_for([&] { return client_stream->retained_packet_count() == 0; }))
+    << client_stream->retained_packet_count() << " acknowledged packets still retained";
+  EXPECT_EQ(client_stream->out_of_history_drop_count(), 0u);
+}
+
 TEST(ScorpioUdp, ClientServerCreation) {
   EXPECT_TRUE(create_server(PORT));
   EXPECT_TRUE(create_client());

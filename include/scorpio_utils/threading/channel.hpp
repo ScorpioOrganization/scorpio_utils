@@ -22,8 +22,11 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <exception>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <optional>
 #include <thread>
@@ -66,7 +69,8 @@ constexpr static inline int64_t channel_default_buffer_size = 1024;
  * It supports both copy and move semantics.
  *
  * \tparam T The type of items to be sent and received - it is required to be copy of move constructible.
- * \tparam Size The size of the channel buffer. Default is 1024. Size must be greater than zero.
+ * \tparam Size The size of the channel buffer. Default is 1024. Size 0 selects the unbounded channel
+ *              (`Channel<T, 0>`, below).
  * \tparam Eager If true, the channel will use busy-waiting for send and receive operations.
  *
  * \warning The channel keeps items within it (Channel size grows linearly with `Size`).
@@ -355,6 +359,207 @@ public:
    */
   constexpr SCU_ALWAYS_INLINE auto free_space() const {
     return _send_waiter.count();
+  }
+};
+
+/**
+ * A thread-safe channel without a capacity limit (`Size` 0).
+ * Sending never blocks and never fails while the channel is open; memory grows with the number of items waiting to
+ * be received instead of being reserved upfront. Otherwise it behaves like the bounded channel: FIFO, multiple
+ * producers and consumers, blocking receive, `eager_select()` support and the same `close()` semantics.
+ *
+ * \tparam T The type of items to be sent and received - it is required to be copy or move constructible.
+ */
+template<typename T>
+class Channel<T, 0> {
+  static_assert(std::is_copy_constructible_v<T>|| std::is_move_constructible_v<T>,
+                "Channel type must be copy constructible");
+
+public:
+  // Value type of the channel.
+  using value_type = T;
+
+  // Size of the channel buffer, 0 means unlimited.
+  constexpr static int64_t buffer_size = 0;
+
+private:
+  mutable std::mutex _mutex;
+  std::deque<T> _items;
+  bool _closed;
+  // Counts the items in `_items`: receivers reserve one before taking it, like with the bounded channel
+  Signal _receive_waiter;
+
+  template<bool Wait>
+  std::conditional_t<Wait, T, std::optional<T>> get_value() {
+    std::lock_guard lock(_mutex);
+    SCU_DEFER(([this]() { _items.pop_front(); }));
+    auto& item = _items.front();
+    if constexpr (Wait) {
+      if constexpr (std::is_move_constructible_v<T>) {
+        return std::move(item);
+      } else {
+        return item;
+      }
+    } else {
+      if constexpr (std::is_move_constructible_v<T>) {
+        return std::optional<T>(std::move(item));
+      } else {
+        return std::optional<T>(item);
+      }
+    }
+  }
+
+  template<typename Item>
+  void push(Item&& item) {
+    {
+      std::lock_guard lock(_mutex);
+      if (SCU_UNLIKELY(_closed)) {
+        throw ClosedChannelException();
+      }
+      _items.emplace_back(std::forward<Item>(item));
+    }
+    _receive_waiter.notify_one();
+  }
+
+public:
+  /**
+   * Checks if the channel has an item and reserves it.
+   * \return true if the channel has an item and it has been reserved, false otherwise.
+   * \throws ClosedChannelException if the channel has been closed.
+   * \warning The reserved item must be retrieved using `SCU_EAGER_SELECT_GET_VALUE()`.
+   *          Function is intended to be used only within eager_select().
+   */
+  SCU_ALWAYS_INLINE auto SCU_EAGER_SELECT_IS_READY() {
+    try {
+      return _receive_waiter.try_take();
+    } catch (const SignalException&) {
+      throw ClosedChannelException();
+    }
+  }
+
+  /**
+   * Retrieves the reserved item from the channel.
+   * \warning This function must be called only after a successful call to `SCU_EAGER_SELECT_IS_READY()`.
+   */
+  SCU_ALWAYS_INLINE decltype(auto) SCU_EAGER_SELECT_GET_VALUE() noexcept {
+    return get_value<true>();
+  }
+
+  Channel()
+  : _closed(false), _receive_waiter(0) { }
+
+  SCU_UNCOPYBLE(Channel);
+  SCU_UNMOVABLE(Channel);
+
+  /**
+   * Send an item to the channel. It never blocks and never fails while the channel is open.
+   *
+   * \tparam Force Kept for the bounded channel's interface, the result is the same either way.
+   * \return void if Force is true, otherwise `false` (the send was successful).
+   * \throws ClosedChannelException if the channel has been closed.
+   */
+  template<bool Force = false, typename U = T>
+  std::enable_if_t<std::is_copy_constructible_v<U>, std::conditional_t<Force, void, bool>> send(const T& item) {
+    push(item);
+    if constexpr (!Force) {
+      return false;
+    }
+  }
+
+  /**
+   * Send an item to the channel. It never blocks and never fails while the channel is open.
+   *
+   * \tparam Force Kept for the bounded channel's interface, the result is the same either way.
+   * \return void if Force is true, otherwise an empty optional (the send was successful).
+   * \throws ClosedChannelException if the channel has been closed.
+   */
+  template<bool Force = false, typename U = T>
+  std::enable_if_t<std::is_move_constructible_v<U>, std::conditional_t<Force, void, std::optional<T>>> send(T&& item) {
+    push(std::move(item));
+    if constexpr (!Force) {
+      return std::nullopt;
+    }
+  }
+
+  /**
+   * Receive an item from the channel.
+   *
+   * \tparam Wait If true, the function blocks (without spinning) until an item is received.
+   * \return If Wait is true, T is returned, otherwise an optional containing the item if the receive was successful,
+   *         or an empty optional if the channel is empty.
+   * \throws ClosedChannelException if the channel has been closed.
+   */
+  template<bool Wait = false>
+  std::conditional_t<Wait, T, std::optional<T>> receive() {
+    try {
+      if constexpr (Wait) {
+        _receive_waiter.wait();
+      } else if (!_receive_waiter.try_take()) {
+        return std::nullopt;
+      }
+    } catch (const SignalException&) {
+      throw ClosedChannelException();
+    }
+    return get_value<Wait>();
+  }
+
+  /**
+   * Close the channel.
+   * This will unblock any threads waiting on receive operations by throwing a `ClosedChannelException`.
+   * After the channel is closed, any further send or receive operations will throw a `ClosedChannelException`.
+   *
+   * \note This operation is idempotent and can be called multiple times safely. However, once closed,
+   *       the channel cannot be reopened.
+   */
+  SCU_ALWAYS_INLINE void close() noexcept {
+    {
+      std::lock_guard lock(_mutex);
+      _closed = true;
+    }
+    _receive_waiter.close();
+  }
+
+  /**
+   * Check if the channel is empty - no message to be received.
+   */
+  SCU_ALWAYS_INLINE bool is_empty() const noexcept {
+    return _receive_waiter.count() <= 0;
+  }
+
+  /**
+   * Check if the channel is full - never, it has no capacity limit.
+   */
+  constexpr SCU_ALWAYS_INLINE bool is_full() const noexcept {
+    return false;
+  }
+
+  /**
+   * Get the number of items available to be received.
+   */
+  SCU_ALWAYS_INLINE auto available() const noexcept {
+    return _receive_waiter.count();
+  }
+
+  /**
+   * Get the size of the channel buffer, 0 means unlimited.
+   */
+  constexpr static SCU_ALWAYS_INLINE auto size() noexcept {
+    return buffer_size;
+  }
+
+  /**
+   * Check if the channel is ready for writing - always while it is open.
+   */
+  SCU_ALWAYS_INLINE bool is_write_ready() const noexcept {
+    std::lock_guard lock(_mutex);
+    return !_closed;
+  }
+
+  /**
+   * Get the number of items that can be sent without blocking - unlimited.
+   */
+  constexpr SCU_ALWAYS_INLINE auto free_space() const noexcept {
+    return std::numeric_limits<int>::max();
   }
 };
 
