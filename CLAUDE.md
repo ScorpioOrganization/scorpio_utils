@@ -93,8 +93,13 @@ which the already connected peer gets its CREATE_STREAM rejected. Its threads ar
 A reliable stream keeps each sent packet in a ring of `depth + SCU_UDP_QOS_DEPTH_SAFETY_BUFFER` slots until the
 peer's heartbeat acknowledges it, then releases it (`retained_packet_count()` shows what is still held); a later
 request for an acknowledged packet is handled like one for an evicted packet (stuck tracking, the stream panics if
-the peer keeps asking for `SCU_UDP_TIMEOUT`). A stream created on a connection
-that closes before activating it fails (`close()` panics the queued ones) and `create_stream` on a closed connection
+the peer keeps asking for `SCU_UDP_TIMEOUT`). `ScorpioUdpStream::send()` returns `Expected<Success, StreamSendError>`:
+a message whose packets do not all fit the free slots gets `BUFFER_FULL` (nothing sent, no sequence number used, no
+panic: retry once the peer acknowledged more, `is_send_buffer_full(bytes)` checks without sending, lock-free), one
+bigger than the whole ring or than 65537 packets gets `MESSAGE_TOO_LARGE` (no panic either), an inactive stream
+`INACTIVE`; only `SEND_FAILED` (socket or connection gone) panics the stream. The framework test target shrinks
+`SCU_UDP_QOS_DEPTH_SAFETY_BUFFER` to 8 (library and test executable alike) so these limits take a handful of packets.
+A stream created on a connection that closes before activating it fails (`close()` panics the queued ones) and `create_stream` on a closed connection
 returns null; only an activated stream owns bits in the connection's stream masks.
 
 The scorpio_udp protocol is described in @SCORPIO_UDP_PROTOCOL.md.
