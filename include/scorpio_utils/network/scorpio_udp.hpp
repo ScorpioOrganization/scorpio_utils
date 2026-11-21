@@ -206,6 +206,20 @@ class ScorpioUdp;
 class ScorpioUdpConnection;
 class ScorpioUdpStream;
 
+/// Why ScorpioUdpStream::send() did not send a message
+enum class StreamSendError : uint8_t {
+  /// The stream is not CREATED (nothing sent, no panic)
+  INACTIVE,
+  /// A reliable stream's send history has no room for the whole message until the peer acknowledges more packets.
+  /// Nothing was sent, no sequence number was used and the stream is not panicked: retry later.
+  BUFFER_FULL,
+  /// The message needs more packets than the stream's send history holds (or than one message can be framed in):
+  /// it can never be sent. Nothing was sent and the stream is not panicked.
+  MESSAGE_TOO_LARGE,
+  /// The packets could not be handed to the socket (connection or socket closed): the stream panicked
+  SEND_FAILED,
+};
+
 class ScorpioUdpStream : public std::enable_shared_from_this<ScorpioUdpStream> {
 public:
   enum class State : uint8_t {
@@ -325,7 +339,7 @@ private:
     StreamNumber stream_number, StreamEpoch stream_epoch, StreamQoS stream_qos,
     bool created_by_peer, std::shared_ptr<ScorpioUdpConnection> parent);
 
-  bool send(Code code, const std::vector<uint8_t>& data);
+  Expected<Success, StreamSendError> send(Code code, const std::vector<uint8_t>& data);
   void panic(std::string&& message);
 
   void connected();
@@ -348,7 +362,10 @@ public:
 
   ~ScorpioUdpStream();
 
-  bool send(const std::vector<uint8_t>& data);
+  Expected<Success, StreamSendError> send(const std::vector<uint8_t>& data);
+  /// True when send() of a message of `bytes` bytes would return BUFFER_FULL right now. Lock-free; false for
+  /// unreliable streams and for messages that are too large (send() rejects those with MESSAGE_TOO_LARGE)
+  bool is_send_buffer_full(size_t bytes) const noexcept;
   template<bool Wait = false>
   SCU_ALWAYS_INLINE auto receive() {
     return _receive.receive<Wait>();

@@ -33,6 +33,7 @@ using scorpio_utils::network::StreamEpoch;
 using scorpio_utils::network::ScorpioUdp;
 using scorpio_utils::network::ScorpioUdpConnection;
 using scorpio_utils::network::ScorpioUdpStream;
+using scorpio_utils::network::StreamSendError;
 using scorpio_utils::network::UdpData;
 using scorpio_utils::network::UdpMessageInfo;
 using scorpio_utils::network::UdpSocket;
@@ -1435,6 +1436,101 @@ public:
 
   std::unique_ptr<StreamSend> stream_send(std::vector<uint8_t> data, bool expect_success = true) {
     return std::unique_ptr<StreamSend>(new StreamSend(shared_from_this(), std::move(data), expect_success));
+  }
+
+  // Like StreamSend, but checks the exact outcome: success (no error expected) or the given error
+  class StreamSendResult final : public EventInTime {
+    friend class StreamHandle;
+    const std::shared_ptr<StreamHandle> _handle;
+    const std::vector<uint8_t> _data;
+    const std::optional<StreamSendError> _expected_error;
+
+    StreamSendResult(
+      std::shared_ptr<StreamHandle> handle, std::vector<uint8_t> data, std::optional<StreamSendError> expected_error)
+    : _handle(std::move(handle)), _data(std::move(data)), _expected_error(expected_error) { }
+
+    static std::string error_name(StreamSendError error) {
+      return std::to_string(static_cast<int>(error));
+    }
+
+public:
+    Expected<Success, std::string> execute(
+      int64_t,
+      UdpSocket&,
+      std::shared_ptr<ScorpioUdp>
+    ) override {
+      SCU_ASSERT(_handle->_stream.has_value(), "Handle does not contain a stream");
+      const auto result = (*(_handle->_stream))->send(_data);
+      if (!_expected_error.has_value()) {
+        if (SCU_UNLIKELY(result.is_err())) {
+          return "Expected the send to succeed, it failed with error "s + error_name(result.err_value());
+        }
+        return Success();
+      }
+      if (SCU_UNLIKELY(result.is_ok())) {
+        return "Expected the send to fail with error "s + error_name(*_expected_error) + ", it succeeded";
+      }
+      if (SCU_UNLIKELY(result.err_value() != *_expected_error)) {
+        return "Expected send error "s + error_name(*_expected_error) + ", got " + error_name(result.err_value());
+      }
+      return Success();
+    }
+    std::string name() override {
+      return "StreamSendResult(" + std::to_string(_data.size()) + " bytes, expected_error=" +
+             (_expected_error.has_value() ? error_name(*_expected_error) : "none"s) + ")";
+    }
+    ~StreamSendResult() override = default;
+  };
+
+  std::unique_ptr<StreamSendResult> stream_send_result(
+    std::vector<uint8_t> data, std::optional<StreamSendError> expected_error) {
+    return std::unique_ptr<StreamSendResult>(new StreamSendResult(shared_from_this(), std::move(data), expected_error));
+  }
+
+  // Polls is_send_buffer_full(bytes) until it matches the expectation (an ack is processed asynchronously)
+  class StreamSendBufferFull final : public EventInTime {
+    friend class StreamHandle;
+    const std::shared_ptr<StreamHandle> _handle;
+    const size_t _bytes;
+    const bool _expect_full;
+    const int64_t _period;
+    const size_t _max_attempts;
+
+    StreamSendBufferFull(
+      std::shared_ptr<StreamHandle> handle, size_t bytes, bool expect_full, int64_t period, size_t max_attempts)
+    : _handle(std::move(handle)), _bytes(bytes), _expect_full(expect_full), _period(period),
+      _max_attempts(max_attempts) { }
+
+public:
+    Expected<Success, std::string> execute(
+      int64_t,
+      UdpSocket&,
+      std::shared_ptr<ScorpioUdp>
+    ) override {
+      SCU_ASSERT(_handle->_stream.has_value(), "Handle does not contain a stream");
+      const auto& stream = *(_handle->_stream);
+      const auto time_provider = ScorpioUdp::get_time_provider();
+      for (size_t attempt = 0; attempt < _max_attempts; ++attempt) {
+        if (stream->is_send_buffer_full(_bytes) == _expect_full) {
+          return Success();
+        }
+        time_provider->advance_time(_period);
+        std::this_thread::sleep_for(std::chrono::nanoseconds(_period));
+      }
+      return Unexpected("Stream is_send_buffer_full(" + std::to_string(_bytes) + ") expectation not met (expected: " +
+        std::to_string(_expect_full) + ")");
+    }
+    std::string name() override {
+      return "StreamSendBufferFull(" + std::to_string(_bytes) + " bytes, expect_full=" +
+             std::to_string(_expect_full) + ")";
+    }
+    ~StreamSendBufferFull() override = default;
+  };
+
+  std::unique_ptr<StreamSendBufferFull> stream_send_buffer_full(
+    size_t bytes, bool expect_full, int64_t period = TICK_TIME, size_t max_attempts = 20) {
+    return std::unique_ptr<StreamSendBufferFull>(
+      new StreamSendBufferFull(shared_from_this(), bytes, expect_full, period, max_attempts));
   }
 
   class StreamReceive final : public EventInTime {
@@ -2992,6 +3088,121 @@ TEST_F(ScorpioUdpTester, reliable_stream_panics_using_first_observed_time_of_stu
 }
 
 // =====================================================================
+// Suite 4b — reliable stream send backpressure
+// =====================================================================
+
+// depth 1 + the shrunk SCU_UDP_QOS_DEPTH_SAFETY_BUFFER (8) of this target: the send history holds 9 packets
+constexpr uint16_t kBackpressureDepth = 1;
+constexpr SeqNumber kBackpressureHistory = kBackpressureDepth + SCU_UDP_QOS_DEPTH_SAFETY_BUFFER;
+static_assert(kBackpressureHistory == 9, "The tests below count packets for a 9 packet history");
+// A reliable STREAM_DATA packet has 8 header bytes (code, stream, seq, epoch) and 2 more (frames left) on every
+// fragment but the last: 502 payload bytes per fragment, up to 504 in the last one
+constexpr size_t kThreeFragmentPayload = 1200;  // 502 + 502 + 196
+constexpr size_t kTenFragmentPayload = 5000;  // 9 * 502 + 482
+
+static std::vector<uint8_t> payload_of_size(size_t size) {
+  std::vector<uint8_t> payload(size);
+  for (size_t i = 0; i < size; ++i) {
+    payload[i] = static_cast<uint8_t>(i * 7 + 3);
+  }
+  return payload;
+}
+
+// Sends `count` one-packet messages (seq 0 .. count - 1) and waits for each of them on the socket (the sender
+// thread hands packets over asynchronously, so a drain right after the sends could miss some)
+static void send_single_packet_messages(
+  std::vector<EventQueueItem>& events, const std::shared_ptr<StreamHandle>& stream_handle, SeqNumber count) {
+  for (SeqNumber seq = 0; seq < count; ++seq) {
+    events.push_back({ WHERE, 0, stream_handle->stream_send_result({ static_cast<uint8_t>(seq) }, std::nullopt) });
+  }
+  for (SeqNumber seq = 0; seq < count; ++seq) {
+    events.push_back({ WHERE, 0, stream_handle->expect_stream_data(seq, { static_cast<uint8_t>(seq) }) });
+  }
+}
+
+TEST_F(ScorpioUdpTester, reliable_stream_send_returns_buffer_full_instead_of_panicking) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = create_outgoing_reliable_stream(events, connection_handle, 1, kBackpressureDepth);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  send_single_packet_messages(events, stream_handle, kBackpressureHistory);
+
+  // Nothing acknowledged yet: the history is full, the send fails without breaking the stream
+  events.push_back({ WHERE, 0, stream_handle->stream_send_buffer_full(1, true) });
+  events.push_back({ WHERE, 0, stream_handle->stream_send_result({ 0xAA }, StreamSendError::BUFFER_FULL) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_panic(false) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_active(true) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectNoPacket>(TICK_TIME, 5,
+                                                                ExpectNoPacket::Filter::STREAM_DATA_ONLY) });
+
+  // The peer acknowledges everything: the same message goes out, with the next sequence number (the rejected
+  // attempt consumed none, so the peer sees no gap)
+  events.push_back({ WHERE, 0, stream_handle->inject_heartbeat(/*initial_end=*/ kBackpressureHistory) });
+  events.push_back({ WHERE, 0, stream_handle->stream_send_buffer_full(1, false) });
+  events.push_back({ WHERE, 0, stream_handle->stream_send_result({ 0xAA }, std::nullopt) });
+  events.push_back({ WHERE, 0, stream_handle->expect_stream_data(kBackpressureHistory, { 0xAA }) });
+  close_connection(events, connection_handle);
+  execute_test(events);
+}
+
+TEST_F(ScorpioUdpTester, reliable_stream_send_buffer_full_sends_no_fragment) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = create_outgoing_reliable_stream(events, connection_handle, 1, kBackpressureDepth);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  // 7 packets in flight leave room for 2, the 3 fragment message does not fit: none of its fragments may go out
+  send_single_packet_messages(events, stream_handle, kBackpressureHistory - 2);
+  const auto payload = payload_of_size(kThreeFragmentPayload);
+  events.push_back({ WHERE, 0, stream_handle->stream_send_buffer_full(payload.size(), true) });
+  events.push_back({ WHERE, 0, stream_handle->stream_send_result(payload, StreamSendError::BUFFER_FULL) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectNoPacket>(TICK_TIME, 5,
+                                                                ExpectNoPacket::Filter::STREAM_DATA_ONLY) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_panic(false) });
+
+  events.push_back({ WHERE, 0, stream_handle->inject_heartbeat(/*initial_end=*/ kBackpressureHistory - 2) });
+  events.push_back({ WHERE, 0, stream_handle->stream_send_buffer_full(payload.size(), false) });
+  events.push_back({ WHERE, 0, stream_handle->stream_send_result(payload, std::nullopt) });
+  events.push_back({ WHERE, 0, stream_handle->expect_stream_data_all(payload, kBackpressureHistory - 2) });
+  close_connection(events, connection_handle);
+  execute_test(events);
+}
+
+TEST_F(ScorpioUdpTester, reliable_stream_send_larger_than_history_returns_too_large) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = create_outgoing_reliable_stream(events, connection_handle, 1, kBackpressureDepth);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  // 10 fragments never fit a 9 packet history: not "full" (waiting would not help), but too large
+  const auto payload = payload_of_size(kTenFragmentPayload);
+  events.push_back({ WHERE, 0, stream_handle->stream_send_buffer_full(payload.size(), false) });
+  events.push_back({ WHERE, 0, stream_handle->stream_send_result(payload, StreamSendError::MESSAGE_TOO_LARGE) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectNoPacket>(TICK_TIME, 5,
+                                                                ExpectNoPacket::Filter::STREAM_DATA_ONLY) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_panic(false) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_active(true) });
+  // The stream keeps working, and the rejected message consumed no sequence number
+  events.push_back({ WHERE, 0, stream_handle->stream_send_result({ 0x01 }, std::nullopt) });
+  events.push_back({ WHERE, 0, stream_handle->expect_stream_data(0, { 0x01 }) });
+  close_connection(events, connection_handle);
+  execute_test(events);
+}
+
+TEST_F(ScorpioUdpTester, reliable_stream_is_send_buffer_full_counts_fragments) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = create_outgoing_reliable_stream(events, connection_handle, 1, kBackpressureDepth);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  events.push_back({ WHERE, 0, stream_handle->stream_send_buffer_full(kThreeFragmentPayload, false) });
+  // 7 in flight: a one packet message still fits, a 3 fragment one does not
+  send_single_packet_messages(events, stream_handle, kBackpressureHistory - 2);
+  events.push_back({ WHERE, 0, stream_handle->stream_send_buffer_full(1, false) });
+  events.push_back({ WHERE, 0, stream_handle->stream_send_buffer_full(kThreeFragmentPayload, true) });
+  events.push_back({ WHERE, 0, stream_handle->stream_send_buffer_full(kTenFragmentPayload, false) });
+  close_connection(events, connection_handle);
+  execute_test(events);
+}
+
+// =====================================================================
 // Suite 5 — unreliable stream data
 // =====================================================================
 
@@ -3021,6 +3232,34 @@ TEST_F(ScorpioUdpTester, unreliable_stream_single_packet_delivered_immediately) 
   events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
     stream_data_packet(2, 0, payload)) });
   events.push_back({ WHERE, 0, stream_handle->stream_receive(payload) });
+  close_connection(events, connection_handle);
+  execute_test(events);
+}
+
+TEST_F(ScorpioUdpTester, unreliable_stream_send_buffer_is_never_full) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = establish_incoming_unreliable_stream(events, connection_handle, 2);
+  events.push_back({ WHERE, 0, stream_handle->stream_send_buffer_full(1, false) });
+  events.push_back({ WHERE, 0, stream_handle->stream_send_buffer_full(kTenFragmentPayload, false) });
+  close_connection(events, connection_handle);
+  execute_test(events);
+}
+
+// Above 65537 fragments a message cannot be framed at all (FramesLeft is 16 bits): too large, the stream stays usable
+TEST_F(ScorpioUdpTester, unreliable_stream_send_above_fragment_limit_returns_too_large) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = establish_incoming_unreliable_stream(events, connection_handle, 2);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  // Unreliable STREAM_DATA: 7 header bytes, 503 payload bytes per fragment, up to 505 in the last one
+  constexpr size_t kAboveFragmentLimit = 505 + 65536 * 503 + 1;  // 65538 fragments
+  events.push_back({ WHERE, 0, stream_handle->stream_send_result(
+    std::vector<uint8_t>(kAboveFragmentLimit, 0x5A), StreamSendError::MESSAGE_TOO_LARGE) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectNoPacket>(TICK_TIME, 3,
+                                                                ExpectNoPacket::Filter::STREAM_DATA_ONLY) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_panic(false) });
+  events.push_back({ WHERE, 0, stream_handle->stream_is_active(true) });
   close_connection(events, connection_handle);
   execute_test(events);
 }

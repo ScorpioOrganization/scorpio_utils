@@ -39,6 +39,9 @@ using scorpio_utils::network::StreamNumber;
 using scorpio_utils::network::UdpData;
 using scorpio_utils::network::TimeProvider;
 using scorpio_utils::network::StreamEpoch;
+using scorpio_utils::network::StreamSendError;
+using scorpio_utils::Expected;
+using scorpio_utils::Success;
 
 static_assert(sizeof(Code::ConnectSubCommands) == 1, "ConnectSubCommands size is assumed to be 1 byte");
 static_assert(sizeof(Code::DisconnectSubCommands) == 1, "DisconnectSubCommands size is assumed to be 1 byte");
@@ -61,6 +64,16 @@ SCU_HOT SCU_CONST_FUNC constexpr size_t packets_count(size_t data_size, size_t h
 SCU_CONST_FUNC constexpr size_t calculate_header_without_frames_left_size(Code code) {
   return sizeof(CodeType) +
          (code.is_command_for_stream() ? (sizeof(SeqNumber) + sizeof(StreamNumber)) : 0);
+}
+
+// The most packets one message can be split into: FramesLeft counts the packets after the first one that carries it
+constexpr size_t MAX_MESSAGE_PACKETS = 65537;
+
+// Packets generate_packets() emits for a message of data_size bytes (one even for an empty message)
+SCU_CONST_FUNC constexpr size_t message_packets_count(Code code, size_t data_size, bool with_epoch) {
+  const auto header_without_frames_left = calculate_header_without_frames_left_size(code) +
+    (with_epoch ? sizeof(StreamEpoch) : 0);
+  return std::max<size_t>(1, packets_count(data_size, header_without_frames_left));
 }
 
 SCU_HOT SCU_PURE static scorpio_utils::Expected<MessageHeader, std::string> parse_header(
@@ -767,9 +780,7 @@ SCU_HOT std::optional<std::pair<size_t, std::vector<std::vector<uint8_t>>>> gene
   const auto header_without_frames_left_size = calculate_header_without_frames_left_size(code) +
     (sizeof(StreamEpoch) * SCU_AS(size_t, stream_epoch.has_value()));
   const auto packets_to_send = packets_count(data.size(), header_without_frames_left_size);
-  if (SCU_UNLIKELY(packets_to_send > 65537)) {
-    // SCU_LOG_ERROR(_logger, "Data is too large to send: {} bytes, max is {} bytes",
-    // packets_to_send, 65537);
+  if (SCU_UNLIKELY(packets_to_send > MAX_MESSAGE_PACKETS)) {
     return std::nullopt;
   }
   std::vector<std::vector<uint8_t>> packets;
@@ -1962,45 +1973,54 @@ bool ScorpioUdpStream::close() {
   return false;
 }
 
-SCU_HOT bool ScorpioUdpStream::send(Code code, const std::vector<uint8_t>& data) {
+SCU_HOT Expected<Success, StreamSendError> ScorpioUdpStream::send(Code code, const std::vector<uint8_t>& data) {
   if (SCU_UNLIKELY(!is_active() && !(state() == State::CLOSING && code == Code::CLOSE_STREAM))) {
     SCU_LOG_ERROR(_logger, "Attempted to send on inactive stream state: {}", magic_enum::enum_name(state()));
-    return false;
+    return StreamSendError::INACTIVE;
   }
   if (SCU_UNLIKELY(!_parent->is_alive())) {
     SCU_LOG_ERROR(_logger, "Attempted to send on stream {} whose connection is dead", _stream_number);
-    return false;
+    return StreamSendError::SEND_FAILED;
+  }
+  const bool reliable = _stream_qos.is_reliable();
+  const bool with_epoch = reliable && code == Code::STREAM_DATA;
+  const auto packets_needed = message_packets_count(code, data.size(), with_epoch);
+  if (SCU_UNLIKELY(packets_needed > MAX_MESSAGE_PACKETS || (reliable && packets_needed > _sent_history.size()))) {
+    // Returned, not logged above DEBUG: the caller decides what a dropped message means
+    SCU_LOG_DEBUG(_logger, "Message of {} bytes ({} packets) is too large for stream {} (history of {} packets)",
+      data.size(), packets_needed, _stream_number, _sent_history.size());
+    return StreamSendError::MESSAGE_TOO_LARGE;
+  }
+  // A reliable stream checks for room and allocates the sequence numbers under the history lock: a message is
+  // either sent whole or not at all, so the peer never waits for sequence numbers that will not come
+  std::unique_lock lock(_sent_history_mutex, std::defer_lock);
+  if (reliable) {
+    lock.lock();
+    const auto least_non_delivered = _least_non_delivered_seq_number.load(std::memory_order_relaxed);
+    const auto next_seq = _sequence_number.load(std::memory_order_relaxed);
+    if (next_seq - least_non_delivered + packets_needed > _sent_history.size()) {
+      SCU_LOG_DEBUG(_logger,
+        "Send history of stream {} is full: least non-delivered seq {}, next seq {}, {} packets needed, history {}",
+        _stream_number, least_non_delivered, next_seq, packets_needed, _sent_history.size());
+      return StreamSendError::BUFFER_FULL;
+    }
   }
   auto packets = _parent->generate_packets(
     code,
     data,
     _stream_number,
     _sequence_number,
-    (_stream_qos.is_reliable() && code == Code::STREAM_DATA) ? std::optional<StreamEpoch>(_stream_epoch) : std::nullopt
+    with_epoch ? std::optional<StreamEpoch>(_stream_epoch) : std::nullopt
   );
   if (SCU_UNLIKELY(!packets.has_value())) {
     SCU_LOG_ERROR(_logger, "Failed to generate packets for sending {} bytes on stream {}",
       data.size(), _stream_number);
-    return false;
-  }
-  std::unique_lock lock(_sent_history_mutex, std::defer_lock);
-  if (_stream_qos.is_reliable()) {
-    lock.lock();
+    return StreamSendError::MESSAGE_TOO_LARGE;
   }
   auto seq = packets->first;
   for (auto& packet : packets->second) {
-    if (_stream_qos.is_reliable()) {
-      const auto pos = seq % _sent_history.size();
-      const auto least_non_delivered = _least_non_delivered_seq_number.load(std::memory_order_relaxed);
-      if (seq - least_non_delivered >= _sent_history.size()) {
-        SCU_LOG_ERROR(_logger,
-                      "QoS depth exceeded for stream {}: least non-delivered seq {}, sent seq {}, history size {}",
-          _stream_number, least_non_delivered, seq, _sent_history.size());
-        panic("QoS depth exceeded " +
-          std::to_string(least_non_delivered) + ", sent seq: " + std::to_string(seq));
-        return false;
-      }
-      _sent_history[pos] = SentPacket{
+    if (reliable) {
+      _sent_history[seq % _sent_history.size()] = SentPacket{
         /*.data           = */ packet,
         /*.seq            = */ seq,
         /*.last_send_time = */ _parent->_time_provider->get_time(),
@@ -2009,12 +2029,12 @@ SCU_HOT bool ScorpioUdpStream::send(Code code, const std::vector<uint8_t>& data)
     SCU_LOG_TRACE(_logger, "Sending packet on stream {}: seq {} (packets left: {})", _stream_number, seq,
       parse_header(packet).ok_value().frames_left.value_or(32767));
     if (SCU_UNLIKELY(!_parent->send(std::move(packet)))) {
-      return false;
+      return StreamSendError::SEND_FAILED;
     }
     ++seq;
   }
   std::atomic_thread_fence(std::memory_order_release);
-  return true;
+  return Success();
 }
 
 SCU_COLD void ScorpioUdpStream::panic(std::string&& message) {
@@ -2281,15 +2301,35 @@ size_t ScorpioUdpStream::retained_packet_count() {
   return SCU_AS(size_t, retained);
 }
 
-SCU_HOT bool ScorpioUdpStream::send(const std::vector<uint8_t>& data) {
+SCU_HOT Expected<Success, StreamSendError> ScorpioUdpStream::send(const std::vector<uint8_t>& data) {
   if (SCU_UNLIKELY(!is_active())) {
+    return StreamSendError::INACTIVE;
+  }
+  auto result = send(Code::STREAM_DATA, data);
+  if (SCU_UNLIKELY(result.is_err())) {
+    const auto error = result.err_value();
+    // A full history or a message that can never fit leave the stream as it was: the caller decides
+    if (error != StreamSendError::BUFFER_FULL && error != StreamSendError::MESSAGE_TOO_LARGE) {
+      panic("Failed to send data on stream (maybe connection or socket is closed?)");
+      return StreamSendError::SEND_FAILED;
+    }
+  }
+  return result;
+}
+
+bool ScorpioUdpStream::is_send_buffer_full(size_t bytes) const noexcept {
+  if (!_stream_qos.is_reliable()) {
     return false;
   }
-  if (SCU_UNLIKELY(!send(Code::STREAM_DATA, data))) {
-    panic("Failed to send data on stream (maybe connection or socket is closed?)");
+  const auto packets_needed = message_packets_count(Code::STREAM_DATA, bytes, true);
+  if (packets_needed > MAX_MESSAGE_PACKETS || packets_needed > _sent_history.size()) {
+    // send() rejects it as MESSAGE_TOO_LARGE, waiting would not help
     return false;
   }
-  return true;
+  // Acknowledged first: both only grow and least non-delivered <= next seq at any time, so this never underflows
+  const auto least_non_delivered = _least_non_delivered_seq_number.load(std::memory_order_acquire);
+  const auto next_seq = _sequence_number.load(std::memory_order_acquire);
+  return next_seq - least_non_delivered + packets_needed > _sent_history.size();
 }
 
 size_t ScorpioUdpStream::get_packet_number(const SeqNumber v) noexcept {

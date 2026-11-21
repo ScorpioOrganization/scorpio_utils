@@ -279,6 +279,8 @@ if(BUILD_TESTING)
   target_compile_definitions(test_scorpio_udp_framework PRIVATE
     -DSCORPIO_UTILS_FRAMEWORK=1
     -DSCU_LOG_LEVEL=5
+    # Same history size as network_framework_test, so the tests can count packets against it
+    -DSCU_UDP_QOS_DEPTH_SAFETY_BUFFER=8
   )
 endif()
 
