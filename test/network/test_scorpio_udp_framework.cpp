@@ -2218,12 +2218,16 @@ protected:
     stabilize_delay();
   }
 
+  // Far past every ScorpioUdp timeout and retry period, but small enough that both jumps keep the clock positive (two
+  // jumps of SCU_UDP_TIMEOUT * 1e9 = 5e18 ns used to wrap it around int64_t)
+  static constexpr int64_t TEAR_DOWN_TIME_JUMP = SCU_UDP_TIMEOUT * 1000;
+
   void TearDown() override {
-    _time_provider->advance_time(SCU_UDP_TIMEOUT * 1000000000);
+    _time_provider->advance_time(TEAR_DOWN_TIME_JUMP);
     stabilize_delay();
     _socket->close_channels();
     _connection.reset();
-    _time_provider->advance_time(SCU_UDP_TIMEOUT * 1000000000);
+    _time_provider->advance_time(TEAR_DOWN_TIME_JUMP);
     stabilize_delay();
     _socket.reset();
     _time_provider.reset();
