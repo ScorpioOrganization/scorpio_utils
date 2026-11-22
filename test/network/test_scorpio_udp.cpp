@@ -11,6 +11,7 @@
 #include "scorpio_utils/decorators.hpp"
 #include "scorpio_utils/logger/os_logger.hpp"
 #include "scorpio_utils/network/scorpio_udp.hpp"
+#include "scorpio_udp_threads.hpp"
 
 using scorpio_utils::network::Ipv4;
 using scorpio_utils::network::localhost;
@@ -18,6 +19,9 @@ using scorpio_utils::network::Port;
 using scorpio_utils::network::ScorpioUdp;
 using scorpio_utils::network::ScorpioUdpConnection;
 using scorpio_utils::network::ScorpioUdpStream;
+
+[[maybe_unused]] static auto* const scorpio_udp_threads_environment =
+  ::testing::AddGlobalTestEnvironment(new WaitForScorpioUdpThreads());
 
 #define PORT SCU_AS(Port, 12307u + SCU_COUNTER)
 // #define PORT SCU_AS(Port, 12007u)
@@ -177,6 +181,9 @@ TEST(ScorpioUdp, StreamsAreRejectedUntilAccepted) {
   ASSERT_TRUE(stream);
   ASSERT_TRUE(wait_for([&] { return creation_finished(stream); }));
   EXPECT_EQ(stream->state(), ScorpioUdpStream::State::REJECTED);
+  // Take the accepted connection: one left in the server's queue keeps the server alive for good (the queue holds the
+  // connection, the connection holds the server), and its threads would outlive the test
+  EXPECT_TRUE(server->get_accepted_connection().has_value());
 }
 
 // A stream created on a connection that already closed is never activated: no stream is handed out, nothing
@@ -201,6 +208,9 @@ TEST(ScorpioUdp, NoStreamOnAClosedConnection) {
       1, { 0, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED }));
   EXPECT_FALSE(stream);
   EXPECT_FALSE(client_connection->is_stream_slot_occupied(1));
+  // Take the accepted connection: one left in the server's queue keeps the server alive for good (the queue holds the
+  // connection, the connection holds the server), and its threads would outlive the test
+  EXPECT_TRUE(server->get_accepted_connection().has_value());
 }
 
 // Packets the peer acknowledged are released right away, a busy reliable stream must not keep its whole send history
@@ -264,8 +274,8 @@ TEST(ScorpioUdp, SendDataOrder) {
   for (uint16_t i = 0; i < NUM_PACKETS; ++i) {
     auto received_data = server_stream->receive<true>();
     ASSERT_EQ(received_data.size(), 2u);
-    uint16_t received_index = static_cast<uint16_t>(received_data[0]) |
-      (static_cast<uint16_t>(received_data[1]) << 8);
+    const auto received_index = static_cast<uint16_t>(static_cast<uint16_t>(received_data[0]) |
+      (static_cast<uint16_t>(received_data[1]) << 8));
     EXPECT_EQ(received_index, i);
   }
 }
@@ -398,8 +408,8 @@ TEST(ScorpioUdp, LongConnection) {
   for (uint16_t i = 0; i < NUM_PACKETS; ++i) {
     auto received_data = server_stream->receive<true>();
     ASSERT_EQ(received_data.size(), 2u);
-    uint16_t received_index = static_cast<uint16_t>(received_data[0]) |
-      (static_cast<uint16_t>(received_data[1]) << 8);
+    const auto received_index = static_cast<uint16_t>(static_cast<uint16_t>(received_data[0]) |
+      (static_cast<uint16_t>(received_data[1]) << 8));
     EXPECT_EQ(received_index, i);
   }
 }

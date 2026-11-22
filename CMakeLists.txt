@@ -113,6 +113,56 @@ if(BUILD_TESTING)
   target_compile_options(${GMOCK_MAIN_LIBRARIES} PRIVATE -Wno-deprecated -Wno-sign-conversion)
   target_compile_options(${GMOCK_LIBRARIES} PRIVATE -Wno-deprecated -Wno-sign-conversion)
 
+  # Every test and everything it tests is built with AddressSanitizer and UndefinedBehaviorSanitizer, and any report
+  # fails the test (-fno-sanitize-recover: UBSan aborts instead of printing and going on). The installed libraries
+  # stay uninstrumented, because a process that loads an ASan library must have the ASan runtime loaded first: the
+  # tests link sanitized copies of them instead, built from the same sources (<library>_sanitized).
+  set(SCU_SANITIZER_FLAGS -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+  # GCC documents that the sanitizers raise false -Wmaybe-uninitialized positives (GCC 13 reports one in
+  # std::variant<int, double, std::string>); the uninstrumented library builds keep the warning
+  set(SCU_SANITIZER_COMPILE_FLAGS ${SCU_SANITIZER_FLAGS})
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    list(APPEND SCU_SANITIZER_COMPILE_FLAGS -Wno-maybe-uninitialized)
+  endif()
+  function(scu_sanitize TARGET)
+    target_compile_options(${TARGET} PRIVATE ${SCU_SANITIZER_COMPILE_FLAGS})
+    target_link_options(${TARGET} PUBLIC ${SCU_SANITIZER_FLAGS})
+  endfunction()
+  # Test executables also print the stack of a UBSan report
+  function(scu_sanitize_test TEST_NAME)
+    scu_sanitize(${TEST_NAME})
+    set_property(TEST ${TEST_NAME} APPEND PROPERTY ENVIRONMENT "UBSAN_OPTIONS=print_stacktrace=1")
+  endfunction()
+
+  set(SANITIZED_LIBRARY_LIST)
+  foreach(LIBRARY ${LIBRARY_LIST})
+    get_target_property(LIBRARY_TYPE ${LIBRARY} TYPE)
+    string(REPLACE "_LIBRARY" "" LIBRARY_TYPE ${LIBRARY_TYPE})
+    get_target_property(LIBRARY_SOURCES ${LIBRARY} SOURCES)
+    add_library(${LIBRARY}_sanitized ${LIBRARY_TYPE} ${LIBRARY_SOURCES})
+    get_target_property(LIBRARY_DEFINITIONS ${LIBRARY} COMPILE_DEFINITIONS)
+    if(LIBRARY_DEFINITIONS)
+      target_compile_definitions(${LIBRARY}_sanitized PRIVATE ${LIBRARY_DEFINITIONS})
+    endif()
+    get_target_property(LIBRARY_LINK_LIBRARIES ${LIBRARY} LINK_LIBRARIES)
+    if(LIBRARY_LINK_LIBRARIES)
+      target_link_libraries(${LIBRARY}_sanitized ${LIBRARY_LINK_LIBRARIES})
+    endif()
+    scu_sanitize(${LIBRARY}_sanitized)
+    list(APPEND SANITIZED_LIBRARY_LIST ${LIBRARY}_sanitized)
+  endforeach()
+
+  # What the ScorpioUdp variant tests link next to their own network library
+  set(SANITIZED_SUPPORT_LIBRARIES
+    buffered_file_saver_sanitized
+    gps_sanitized
+    lifetime_helper_sanitized
+    string_utils_sanitized
+    time_provider_sanitized
+    time_utils_sanitized
+    threading_sanitized
+  )
+
   # List of test names
   set(TESTS_NAMES
     geometry/test_discrete_rotation.cpp
@@ -162,8 +212,9 @@ if(BUILD_TESTING)
     get_filename_component(TEST_NAME ${PATH_TO_TEST} NAME_WE)
     ament_add_gtest(${TEST_NAME}
       test/${PATH_TO_TEST})
-    target_link_libraries(${TEST_NAME} ${LIBRARY_LIST})
+    target_link_libraries(${TEST_NAME} ${SANITIZED_LIBRARY_LIST})
     ament_target_dependencies(${TEST_NAME} rclcpp std_msgs)
+    scu_sanitize_test(${TEST_NAME})
   endforeach()
 
   # Real-socket integration suite runs 6 sleep-dominated cases sequentially (~60s),
@@ -176,6 +227,7 @@ if(BUILD_TESTING)
     src/network/scorpio_udp.cpp
   )
   target_link_libraries(network_mock fmt::fmt)
+  scu_sanitize(network_mock)
 
   # Test of mock_udp.cpp required for network tests
   ament_add_gtest(test_mock_udp test/network/test_udp.cpp)
@@ -187,6 +239,7 @@ if(BUILD_TESTING)
   )
 
   target_link_libraries(test_mock_udp network_mock)
+  scu_sanitize_test(test_mock_udp)
 
   # Uncomment to enable packet loss and delay simulation in tests
   # However, right now it fails - needs to be fixed (possibly mock udp implementation issue)
@@ -202,16 +255,8 @@ if(BUILD_TESTING)
     -DSCU_MOCK_UDP_PACKET_LOSS_PERCENTAGE=10
   )
 
-  target_link_libraries(test_scorpio_udp_mock
-    buffered_file_saver
-    gps
-    lifetime_helper
-    network_mock
-    string_utils
-    time_provider
-    time_utils
-    threading
-  )
+  target_link_libraries(test_scorpio_udp_mock network_mock ${SANITIZED_SUPPORT_LIBRARIES})
+  scu_sanitize_test(test_scorpio_udp_mock)
 
   # Test of scorpio_udp with gmock for udp.hpp
   ament_add_gtest(test_scorpio_udp_gmock test/network/test_scorpio_udp_gmock.cpp)
@@ -228,17 +273,9 @@ if(BUILD_TESTING)
   )
   target_include_directories(network_gmock PRIVATE SYSTEM ${GMOCK_INCLUDE_DIRS})
   target_link_libraries(network_gmock ${GMOCK_MAIN_LIBRARIES} ${GMOCK_LIBRARIES})
+  scu_sanitize(network_gmock)
 
-  target_link_libraries(test_scorpio_udp_gmock
-    buffered_file_saver
-    gps
-    lifetime_helper
-    network_gmock
-    string_utils
-    time_provider
-    time_utils
-    threading
-  )
+  target_link_libraries(test_scorpio_udp_gmock network_gmock ${SANITIZED_SUPPORT_LIBRARIES})
   target_include_directories(test_scorpio_udp_gmock PRIVATE SYSTEM ${GMOCK_INCLUDE_DIRS})
   target_link_libraries(test_scorpio_udp_gmock ${GMOCK_MAIN_LIBRARIES} ${GMOCK_LIBRARIES})
   target_compile_options(test_scorpio_udp_gmock PRIVATE -std=gnu++17)
@@ -246,6 +283,7 @@ if(BUILD_TESTING)
     -DSCORPIO_UTILS_UDP_GMOCK=1
     -DSCU_LOG_LEVEL=5
   )
+  scu_sanitize_test(test_scorpio_udp_gmock)
 
   # Test of scorpio_udp with framework
   ament_add_gtest(test_scorpio_udp_framework test/network/test_scorpio_udp_framework.cpp TIMEOUT 180)
@@ -263,25 +301,17 @@ if(BUILD_TESTING)
     -DSCU_UDP_QOS_DEPTH_SAFETY_BUFFER=8
   )
   target_include_directories(network_framework_test PRIVATE SYSTEM ${GMOCK_INCLUDE_DIRS})
-  target_link_libraries(network_framework_test -fsanitize=address,undefined ${GMOCK_MAIN_LIBRARIES} ${GMOCK_LIBRARIES})
-  target_compile_options(network_framework_test PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+  target_link_libraries(network_framework_test ${GMOCK_MAIN_LIBRARIES} ${GMOCK_LIBRARIES})
+  scu_sanitize(network_framework_test)
 
-  target_link_libraries(test_scorpio_udp_framework
-    buffered_file_saver
-    gps
-    lifetime_helper
-    network_framework_test
-    string_utils
-    time_provider
-    time_utils
-    threading
-  )
+  target_link_libraries(test_scorpio_udp_framework network_framework_test ${SANITIZED_SUPPORT_LIBRARIES})
   target_compile_definitions(test_scorpio_udp_framework PRIVATE
     -DSCORPIO_UTILS_FRAMEWORK=1
     -DSCU_LOG_LEVEL=5
     # Same history size as network_framework_test, so the tests can count packets against it
     -DSCU_UDP_QOS_DEPTH_SAFETY_BUFFER=8
   )
+  scu_sanitize_test(test_scorpio_udp_framework)
 endif()
 
 ament_export_include_directories(include

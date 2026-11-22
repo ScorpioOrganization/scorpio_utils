@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <optional>
 #include <set>
 #include <thread>
 #include <tuple>
@@ -9,6 +10,7 @@
 
 #include "scorpio_utils/decorators.hpp"
 #include "scorpio_utils/network/scorpio_udp.hpp"
+#include "scorpio_udp_threads.hpp"
 #include "scorpio_utils/threading/jthread.hpp"
 
 using scorpio_utils::network::Ipv4;
@@ -17,6 +19,9 @@ using scorpio_utils::network::Port;
 using scorpio_utils::network::ScorpioUdp;
 using scorpio_utils::network::ScorpioUdpConnection;
 using scorpio_utils::network::ScorpioUdpStream;
+
+[[maybe_unused]] static auto* const scorpio_udp_threads_environment =
+  ::testing::AddGlobalTestEnvironment(new WaitForScorpioUdpThreads());
 
 #define PORT SCU_AS(Port, 12307u + SCU_COUNTER)
 // #define PORT SCU_AS(Port, 12007u)
@@ -141,9 +146,44 @@ TEST(MockScorpioUdp, SendDataOrder) {
   for (uint16_t i = 0; i < 1000; ++i) {
     auto received_data = server_stream->receive<true>();
     ASSERT_EQ(received_data.size(), 2u);
-    uint16_t received_index = static_cast<uint16_t>(received_data[0]) |
-      (static_cast<uint16_t>(received_data[1]) << 8);
+    const auto received_index = static_cast<uint16_t>(static_cast<uint16_t>(received_data[0]) |
+      (static_cast<uint16_t>(received_data[1]) << 8));
     EXPECT_EQ(received_index, i);
+  }
+}
+
+// An empty message used to share its sequence number with the next message, which the peer then dropped as a
+// duplicate
+TEST(MockScorpioUdp, EmptyMessageDoesNotSwallowNextMessage) {
+  const auto [client_connection, server_connection] = get_client_server_connection(PORT);
+  ASSERT_TRUE(client_connection);
+  ASSERT_TRUE(server_connection);
+  server_connection->set_auto_accept_stream(true);
+  client_connection->set_auto_accept_stream(true);
+  auto server_stream =
+    server_connection->create_stream(1, { 100, ScorpioUdpStream::StreamQoS::Reliability::RELIABLE_ORDERED });
+  std::this_thread::sleep_for(std::chrono::seconds(3));
+  ASSERT_TRUE(server_stream);
+  ASSERT_TRUE(server_stream->is_active()) << SCU_AS(int, server_stream->state());
+  auto client_stream_opt = client_connection->get_accepted_stream();
+  ASSERT_TRUE(client_stream_opt.has_value());
+  auto client_stream = std::move(client_stream_opt).value();
+  ASSERT_TRUE(client_stream->is_active());
+  ASSERT_TRUE(client_stream->send(std::vector<uint8_t>{ }));
+  ASSERT_TRUE(client_stream->send(std::vector<uint8_t>{ 1, 2 }));
+  ASSERT_TRUE(client_stream->send(std::vector<uint8_t>{ }));
+  ASSERT_TRUE(client_stream->send(std::vector<uint8_t>{ 3 }));
+  const std::vector<std::vector<uint8_t>> expected{ { }, { 1, 2 }, { }, { 3 } };
+  for (const auto& message : expected) {
+    std::optional<std::vector<uint8_t>> received;
+    for (int attempt = 0; attempt < 500 && !received.has_value(); ++attempt) {
+      received = server_stream->receive<false>();
+      if (!received.has_value()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    }
+    ASSERT_TRUE(received.has_value()) << "message of " << message.size() << " bytes never arrived";
+    EXPECT_EQ(*received, message);
   }
 }
 

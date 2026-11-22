@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 #include <atomic>
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <thread>
 #include <variant>
@@ -180,6 +181,31 @@ TEST(EagerSelectTimeout, MultipleStartsUpdateStartTime) {
 
   time_provider->advance_time(500000);
   EXPECT_TRUE(timeout.is_elapsed());
+}
+
+// now - start does not fit int64_t: is_elapsed() must neither overflow (undefined behaviour) nor report the wrapped
+// difference
+TEST(EagerSelectTimeout, ClockFarAheadOfStartIsElapsed) {
+  auto time_provider = std::make_shared<MockTimeProvider>();
+  EagerSelectTimeout<MockTimeProvider> timeout(1000000, time_provider);
+  time_provider->set_time(-5'000'000'000'000'000'000);
+  timeout.start();
+  time_provider->set_time(5'000'000'000'000'000'000);
+  EXPECT_TRUE(timeout.is_elapsed());
+  time_provider->set_time(std::numeric_limits<int64_t>::max());
+  EXPECT_TRUE(timeout.is_elapsed());
+}
+
+// The ScorpioUdp framework fixture used to wrap its mock clock like this at teardown (two jumps of 5e18 ns)
+TEST(EagerSelectTimeout, ClockFarBehindStartIsNotElapsed) {
+  auto time_provider = std::make_shared<MockTimeProvider>();
+  EagerSelectTimeout<MockTimeProvider> timeout(1000000, time_provider);
+  time_provider->set_time(5'000'000'000'000'000'000);
+  timeout.start();
+  time_provider->set_time(-8'446'744'073'709'551'616);
+  EXPECT_FALSE(timeout.is_elapsed());
+  time_provider->set_time(std::numeric_limits<int64_t>::min());
+  EXPECT_FALSE(timeout.is_elapsed());
 }
 
 TEST(EagerSelectTimeout, WithSystemTimeProvider) {

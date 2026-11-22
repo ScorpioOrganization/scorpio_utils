@@ -29,6 +29,8 @@ colcon test-result --verbose
 
 Compiler flags are strict: `-std=c++17 -Wall -Wextra -Wpedantic -pedantic-errors -Wdeprecated -Wc++17-compat -Wconversion -Wsign-conversion -Wpessimizing-move -Werror`. Any new warning fails the build — fix the root cause instead of suppressing.
 
+Every test is built with AddressSanitizer and UndefinedBehaviorSanitizer (`-fsanitize=address,undefined -fno-sanitize-recover=all`, the `scu_sanitize` / `scu_sanitize_test` functions in [CMakeLists.txt](CMakeLists.txt)), and so is what it tests: the ScorpioUdp variant libraries and `<library>_sanitized`, a copy of every installed library built from the same sources. A sanitizer report fails the test (UBSan aborts instead of printing and going on). The installed libraries are not instrumented, since a process loading an ASan library needs the ASan runtime first. UBSan also changes what GCC can prove about value ranges, so it can raise `-Wconversion` errors a plain build does not (cast explicitly); `-Wmaybe-uninitialized` is off in sanitized GCC builds, whose false positives GCC documents. The ScorpioUdp test programs with real or mock sockets register `WaitForScorpioUdpThreads` ([test/network/scorpio_udp_threads.hpp](test/network/scorpio_udp_threads.hpp)): at exit they wait for every `sudp_*` thread to end, because ScorpioUdp winds down in the background and threads still running at `exit()` use destroyed globals; threads still there after `3 * SCU_UDP_TIMEOUT` fail the program as a leaked ScorpioUdp. An accepted connection nobody takes with `get_accepted_connection()` leaks its ScorpioUdp that way (the queue holds the connection, the connection holds the ScorpioUdp).
+
 Linting (mirrors `.github/workflows/ci-core.yml`; CI gates merges to `master`):
 
 ```bash

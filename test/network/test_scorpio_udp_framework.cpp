@@ -2218,12 +2218,16 @@ protected:
     stabilize_delay();
   }
 
+  // Far past every ScorpioUdp timeout and retry period, but small enough that both jumps keep the clock positive (two
+  // jumps of SCU_UDP_TIMEOUT * 1e9 = 5e18 ns used to wrap it around int64_t)
+  static constexpr int64_t TEAR_DOWN_TIME_JUMP = SCU_UDP_TIMEOUT * 1000;
+
   void TearDown() override {
-    _time_provider->advance_time(SCU_UDP_TIMEOUT * 1000000000);
+    _time_provider->advance_time(TEAR_DOWN_TIME_JUMP);
     stabilize_delay();
     _socket->close_channels();
     _connection.reset();
-    _time_provider->advance_time(SCU_UDP_TIMEOUT * 1000000000);
+    _time_provider->advance_time(TEAR_DOWN_TIME_JUMP);
     stabilize_delay();
     _socket.reset();
     _time_provider.reset();
@@ -3202,6 +3206,51 @@ TEST_F(ScorpioUdpTester, reliable_stream_is_send_buffer_full_counts_fragments) {
   execute_test(events);
 }
 
+// An empty message is still one packet, so it must use up its own sequence number: the message after it used to get
+// the same one and the peer dropped it as a duplicate
+TEST(ScorpioUdpPackets, empty_message_takes_one_sequence_number) {
+  std::atomic<size_t> sequence_number{ 5 };
+  auto result = generate_packets(StreamNumber{ 1 }, sequence_number, Code::STREAM_DATA, { }, TEST_STREAM_EPOCH);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->first, 5u);
+  EXPECT_EQ(result->second.size(), 1u);
+  EXPECT_EQ(sequence_number.load(), 6u);
+
+  result = generate_packets(StreamNumber{ 1 }, sequence_number, Code::STREAM_DATA, { 0x01 }, TEST_STREAM_EPOCH);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->first, 6u);
+  EXPECT_EQ(sequence_number.load(), 7u);
+}
+
+TEST_F(ScorpioUdpTester, reliable_stream_empty_message_takes_its_own_seq) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = create_outgoing_reliable_stream(events, connection_handle, 1, 16);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  events.push_back({ WHERE, 0, stream_handle->stream_send_result({ }, std::nullopt) });
+  events.push_back({ WHERE, 0, stream_handle->stream_send_result({ 0x01 }, std::nullopt) });
+  events.push_back({ WHERE, 0, stream_handle->expect_stream_data(0, { }) });
+  events.push_back({ WHERE, 0, stream_handle->expect_stream_data(1, { 0x01 }) });
+  close_connection(events, connection_handle);
+  execute_test(events);
+}
+
+// The receiving side already handled an empty message as one sequence number, so peers running the old sender code
+// and peers running the new one understand each other
+TEST_F(ScorpioUdpTester, reliable_stream_receives_empty_message) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = establish_incoming_reliable_stream(events, connection_handle, 1, 16);
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    stream_data_packet(1, 0, { }, TEST_STREAM_EPOCH)) });
+  events.push_back({ WHERE, 0, std::make_unique<SendPacket>(Ipv4(127, 0, 0, 1), 12345,
+    stream_data_packet(1, 1, { 0x01 }, TEST_STREAM_EPOCH)) });
+  events.push_back({ WHERE, 0, stream_handle->stream_receive({ }) });
+  events.push_back({ WHERE, 0, stream_handle->stream_receive({ 0x01 }) });
+  close_connection(events, connection_handle);
+  execute_test(events);
+}
+
 // =====================================================================
 // Suite 5 — unreliable stream data
 // =====================================================================
@@ -3260,6 +3309,21 @@ TEST_F(ScorpioUdpTester, unreliable_stream_send_above_fragment_limit_returns_too
                                                                 ExpectNoPacket::Filter::STREAM_DATA_ONLY) });
   events.push_back({ WHERE, 0, stream_handle->stream_is_panic(false) });
   events.push_back({ WHERE, 0, stream_handle->stream_is_active(true) });
+  close_connection(events, connection_handle);
+  execute_test(events);
+}
+
+TEST_F(ScorpioUdpTester, unreliable_stream_empty_message_takes_its_own_seq) {
+  std::vector<EventQueueItem> events;
+  auto connection_handle = create_connection(events);
+  auto stream_handle = establish_incoming_unreliable_stream(events, connection_handle, 2);
+  events.push_back({ WHERE, 0, std::make_unique<DrainSendQueueEvent>() });
+  events.push_back({ WHERE, 0, stream_handle->stream_send_result({ }, std::nullopt) });
+  events.push_back({ WHERE, 0, stream_handle->stream_send_result({ 0x01 }, std::nullopt) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    stream_data_packet(2, 0, { })) });
+  events.push_back({ WHERE, 0, std::make_unique<ExpectPacketTimeout>(Ipv4(127, 0, 0, 1), 12345,
+    stream_data_packet(2, 1, { 0x01 })) });
   close_connection(events, connection_handle);
   execute_test(events);
 }

@@ -29,6 +29,7 @@
 #include "scorpio_utils/assert.hpp"
 #include "scorpio_utils/decorators.hpp"
 #include "scorpio_utils/optional_utils.hpp"
+#include "scorpio_utils/sat_math.hpp"
 #include "scorpio_utils/time_provider/time_provider.hpp"
 
 #define SCU_EAGER_SELECT_IS_READY __SCU_is_eager_select_ready
@@ -285,8 +286,9 @@ public:
   }
 
   SCU_ALWAYS_INLINE auto is_elapsed() const noexcept {
+    // Saturated: a clock that jumped further than int64_t can represent (only seen with mock clocks) must not overflow
     return optional_map([this](auto start_time) {
-               return _time_provider->get_time() - start_time >= _timeout;
+               return sat_sub(_time_provider->get_time(), start_time) >= _timeout;
     }, _start_time).value_or(false);
   }
 };
