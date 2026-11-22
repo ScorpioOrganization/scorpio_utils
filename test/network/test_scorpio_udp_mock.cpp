@@ -10,6 +10,7 @@
 
 #include "scorpio_utils/decorators.hpp"
 #include "scorpio_utils/network/scorpio_udp.hpp"
+#include "scorpio_udp_threads.hpp"
 #include "scorpio_utils/threading/jthread.hpp"
 
 using scorpio_utils::network::Ipv4;
@@ -18,6 +19,9 @@ using scorpio_utils::network::Port;
 using scorpio_utils::network::ScorpioUdp;
 using scorpio_utils::network::ScorpioUdpConnection;
 using scorpio_utils::network::ScorpioUdpStream;
+
+[[maybe_unused]] static auto* const scorpio_udp_threads_environment =
+  ::testing::AddGlobalTestEnvironment(new WaitForScorpioUdpThreads());
 
 #define PORT SCU_AS(Port, 12307u + SCU_COUNTER)
 // #define PORT SCU_AS(Port, 12007u)
@@ -142,8 +146,8 @@ TEST(MockScorpioUdp, SendDataOrder) {
   for (uint16_t i = 0; i < 1000; ++i) {
     auto received_data = server_stream->receive<true>();
     ASSERT_EQ(received_data.size(), 2u);
-    uint16_t received_index = static_cast<uint16_t>(received_data[0]) |
-      (static_cast<uint16_t>(received_data[1]) << 8);
+    const auto received_index = static_cast<uint16_t>(static_cast<uint16_t>(received_data[0]) |
+      (static_cast<uint16_t>(received_data[1]) << 8));
     EXPECT_EQ(received_index, i);
   }
 }
