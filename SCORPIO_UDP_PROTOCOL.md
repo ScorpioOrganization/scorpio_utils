@@ -453,6 +453,7 @@ Large messages are split automatically:
 - When fragmented, every packet except the last carries `FramesLeft` (counting down); the first fragment additionally sets the `FIRST` flag
 - The last packet clears `NOT_LAST` and omits `FramesLeft`
 - Usable payload is `512 - header_size`; fragmented packets lose a further 2 bytes to the `FramesLeft` field
+- Every packet takes its own sequence number. An empty message is one packet without payload and takes one too
 
 On the receive side:
 - **Reliable streams**: the `Orderer` reassembles fragments in sequence order before delivering

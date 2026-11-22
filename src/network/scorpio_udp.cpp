@@ -50,8 +50,10 @@ static_assert(sizeof(Code::DisconnectSubCommands) == 1, "DisconnectSubCommands s
 
 struct PanicException : public std::exception { };
 
+// Packets a message of data_size bytes is split into: at least one, an empty message is one packet without payload
+// (and takes one sequence number like any other packet)
 SCU_HOT SCU_CONST_FUNC constexpr size_t packets_count(size_t data_size, size_t header_without_frames_left) {
-  size_t packets = SCU_AS(size_t, data_size != 0);
+  size_t packets = 1;
   if (data_size > (SCU_UDP_MAX_PACKET_SIZE - header_without_frames_left)) {
     data_size -= (SCU_UDP_MAX_PACKET_SIZE - header_without_frames_left);
     auto packet_size = (SCU_UDP_MAX_PACKET_SIZE - header_without_frames_left - sizeof(FramesLeft));
@@ -69,11 +71,11 @@ SCU_CONST_FUNC constexpr size_t calculate_header_without_frames_left_size(Code c
 // The most packets one message can be split into: FramesLeft counts the packets after the first one that carries it
 constexpr size_t MAX_MESSAGE_PACKETS = 65537;
 
-// Packets generate_packets() emits for a message of data_size bytes (one even for an empty message)
+// Packets generate_packets() emits for a message of data_size bytes
 SCU_CONST_FUNC constexpr size_t message_packets_count(Code code, size_t data_size, bool with_epoch) {
   const auto header_without_frames_left = calculate_header_without_frames_left_size(code) +
     (with_epoch ? sizeof(StreamEpoch) : 0);
-  return std::max<size_t>(1, packets_count(data_size, header_without_frames_left));
+  return packets_count(data_size, header_without_frames_left);
 }
 
 SCU_HOT SCU_PURE static scorpio_utils::Expected<MessageHeader, std::string> parse_header(
@@ -839,7 +841,9 @@ SCU_HOT std::optional<std::pair<size_t, std::vector<std::vector<uint8_t>>>> gene
     SCU_DO_AND_ASSERT(host_to_network(*stream_epoch, packets.back(), packet_pos),
             "Failed to convert stream epoch to network format");
   }
-  std::memcpy(packets.back().data() + packet_pos, data.data() + current, data.size() - current);
+  if (data.size() != current) {  // memcpy from an empty vector's data() (may be null) is undefined even for 0 bytes
+    std::memcpy(packets.back().data() + packet_pos, data.data() + current, data.size() - current);
+  }
   return { { first_packet_seq, packets } };
 }
 
